@@ -10,6 +10,7 @@ import queueRoutes from './routes/queueRoutes';
 import historyRoutes from './routes/historyRoutes';
 import monitorRoutes from './routes/monitorRoutes';
 import appRoutes from './routes/appRoutes';
+import dataRoutes from './routes/dataRoutes';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -29,6 +30,7 @@ app.use('/api/queue', queueRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/monitor', monitorRoutes);
 app.use('/api/apps', appRoutes);
+app.use('/api/data', dataRoutes);
 
 app.get('/health', (req, res) => {
   res.json({

@@ -14,6 +14,7 @@ export class PushService {
   async send(request: PushRequest): Promise<{
     request_id: string;
     messages: { channel: ChannelType; message_id: string; status: string }[];
+    skipped?: { channel: ChannelType; reason: string }[];
   }> {
     const requestId = uuidv4();
     const template = templateService.getTemplate(request.template_id);
@@ -59,6 +60,7 @@ export class PushService {
     }
 
     const results: { channel: ChannelType; message_id: string; status: string }[] = [];
+    const skipped: { channel: ChannelType; reason: string }[] = [];
 
     for (const channel of channels) {
       if (!channelManager.hasChannel(channel)) {
@@ -81,6 +83,10 @@ export class PushService {
         template.published_version
       );
       if (!rendered) {
+        skipped.push({
+          channel,
+          reason: `Template "${template.name}" (id=${template.id}) missing ${language} content for channel "${channel}" in published version ${template.published_version}`
+        });
         continue;
       }
 
@@ -106,7 +112,7 @@ export class PushService {
       });
     }
 
-    return { request_id: requestId, messages: results };
+    return { request_id: requestId, messages: results, ...(skipped.length > 0 ? { skipped } : {}) };
   }
 
   async processQueue(channel?: ChannelType, batchSize: number = 10): Promise<number> {

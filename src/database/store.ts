@@ -1,9 +1,10 @@
-import { Template, TemplateContent, TemplateStatus, User, UserPreference, QueueMessage, SendHistory, Alert, AppClient, ChannelType, PriorityType, MessageStatus, AlertLevel, BacklogSnapshot, FailureReasonEntry, DeliveryStats, AuditLog, CircuitBreakerState, CircuitState, RateLimiterState, LatencyBucket } from '../types';
+import { Template, TemplateContent, TemplateStatus, User, UserPreference, QueueMessage, SendHistory, Alert, AppClient, ChannelType, PriorityType, MessageStatus, AlertLevel, BacklogSnapshot, FailureReasonEntry, DeliveryStats, AuditLog, CircuitBreakerState, CircuitState, RateLimiterState, LatencyBucket, DataTag } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
 
 interface DataStore {
+  data_tag: DataTag;
   templates: Template[];
   templateContents: TemplateContent[];
   users: User[];
@@ -69,6 +70,7 @@ function loadFromFile(): boolean {
       store.backlogSnapshots = Array.isArray(data.backlogSnapshots) ? data.backlogSnapshots : [];
       store.auditLogs = Array.isArray(data.auditLogs) ? data.auditLogs : [];
       store.latencyRecords = Array.isArray(data.latencyRecords) ? data.latencyRecords : [];
+      if (!store.data_tag) store.data_tag = 'production';
       for (const t of store.templates) {
         if (t.status === undefined) t.status = 'published';
         if (t.current_version === undefined) t.current_version = 1;
@@ -105,6 +107,7 @@ function nextAutoId(): number {
 
 export function initDatabase(dbPath?: string): DataStore {
   store = {
+    data_tag: 'production',
     templates: [],
     templateContents: [],
     users: [],
@@ -583,55 +586,60 @@ export const historyRepo = {
     const sent = items.filter(h => h.status === 'sent' || h.status === 'delivered').length;
     const delivered = items.filter(h => h.status === 'delivered').length;
     const failed = items.filter(h => h.status === 'failed').length;
-    return { total, sent, delivered, failed, delivery_rate: total > 0 ? delivered / total : 0, success_rate: total > 0 ? sent / total : 0 };
+    const cancelled = items.filter(h => h.status === 'cancelled').length;
+    return { total, sent, delivered, failed, cancelled, delivery_rate: total > 0 ? delivered / total : 0, success_rate: total > 0 ? sent / total : 0, cancel_rate: total > 0 ? cancelled / total : 0 };
   },
   statsByChannel(params?: { start_time?: number; end_time?: number; app_id?: string; }): { channel: ChannelType; stats: DeliveryStats }[] {
     const channels: ChannelType[] = ['email', 'sms', 'inapp', 'webhook'];
     return channels.map(channel => ({ channel, stats: this.deliveryStats({ ...params, channel }) }));
   },
   statsByTemplate(params?: { start_time?: number; end_time?: number; app_id?: string; limit?: number; }): { template_id: string; template_name: string; stats: DeliveryStats }[] {
-    const map = new Map<string, { template_id: string; template_name: string; total: number; sent: number; delivered: number; failed: number }>();
+    const map = new Map<string, { template_id: string; template_name: string; total: number; sent: number; delivered: number; failed: number; cancelled: number }>();
     let items = getStore().sendHistory;
     if (params?.start_time) items = items.filter(h => h.created_at >= params.start_time!);
     if (params?.end_time) items = items.filter(h => h.created_at <= params.end_time!);
     if (params?.app_id) items = items.filter(h => h.app_id === params.app_id);
     for (const h of items) {
-      if (!map.has(h.template_id)) map.set(h.template_id, { template_id: h.template_id, template_name: h.template_name, total: 0, sent: 0, delivered: 0, failed: 0 });
+      if (!map.has(h.template_id)) map.set(h.template_id, { template_id: h.template_id, template_name: h.template_name, total: 0, sent: 0, delivered: 0, failed: 0, cancelled: 0 });
       const e = map.get(h.template_id)!;
       e.total++;
       if (h.status === 'sent' || h.status === 'delivered') e.sent++;
       if (h.status === 'delivered') e.delivered++;
       if (h.status === 'failed') e.failed++;
+      if (h.status === 'cancelled') e.cancelled++;
     }
     let result = Array.from(map.values()).map(e => ({
       template_id: e.template_id, template_name: e.template_name,
-      stats: { total: e.total, sent: e.sent, delivered: e.delivered, failed: e.failed,
+      stats: { total: e.total, sent: e.sent, delivered: e.delivered, failed: e.failed, cancelled: e.cancelled,
         delivery_rate: e.total > 0 ? e.delivered / e.total : 0,
-        success_rate: e.total > 0 ? e.sent / e.total : 0 }
+        success_rate: e.total > 0 ? e.sent / e.total : 0,
+        cancel_rate: e.total > 0 ? e.cancelled / e.total : 0 }
     }));
     result.sort((a, b) => b.stats.total - a.stats.total);
     if (params?.limit) result = result.slice(0, params.limit);
     return result;
   },
   statsByApp(params?: { start_time?: number; end_time?: number; limit?: number; }): { app_id: string; stats: DeliveryStats }[] {
-    const map = new Map<string, { app_id: string; total: number; sent: number; delivered: number; failed: number }>();
+    const map = new Map<string, { app_id: string; total: number; sent: number; delivered: number; failed: number; cancelled: number }>();
     let items = getStore().sendHistory;
     if (params?.start_time) items = items.filter(h => h.created_at >= params.start_time!);
     if (params?.end_time) items = items.filter(h => h.created_at <= params.end_time!);
     for (const h of items) {
       const aid = h.app_id || '_unknown';
-      if (!map.has(aid)) map.set(aid, { app_id: aid, total: 0, sent: 0, delivered: 0, failed: 0 });
+      if (!map.has(aid)) map.set(aid, { app_id: aid, total: 0, sent: 0, delivered: 0, failed: 0, cancelled: 0 });
       const e = map.get(aid)!;
       e.total++;
       if (h.status === 'sent' || h.status === 'delivered') e.sent++;
       if (h.status === 'delivered') e.delivered++;
       if (h.status === 'failed') e.failed++;
+      if (h.status === 'cancelled') e.cancelled++;
     }
     let result = Array.from(map.values()).map(e => ({
       app_id: e.app_id,
-      stats: { total: e.total, sent: e.sent, delivered: e.delivered, failed: e.failed,
+      stats: { total: e.total, sent: e.sent, delivered: e.delivered, failed: e.failed, cancelled: e.cancelled,
         delivery_rate: e.total > 0 ? e.delivered / e.total : 0,
-        success_rate: e.total > 0 ? e.sent / e.total : 0 }
+        success_rate: e.total > 0 ? e.sent / e.total : 0,
+        cancel_rate: e.total > 0 ? e.cancelled / e.total : 0 }
     }));
     result.sort((a, b) => b.stats.total - a.stats.total);
     if (params?.limit) result = result.slice(0, params.limit);
@@ -1014,6 +1022,97 @@ export const channelRuntimeRepo = {
   getAllRateLimiterStates(): RateLimiterState[] {
     const channels: ChannelType[] = ['email', 'sms', 'inapp', 'webhook'];
     return channels.map(ch => initRateLimiter(ch));
+  }
+};
+
+export const dataManagementRepo = {
+  getTag(): DataTag {
+    return getStore().data_tag;
+  },
+  setTag(tag: DataTag): void {
+    getStore().data_tag = tag;
+    scheduleSave();
+  },
+  getSummary(): { data_tag: DataTag; templates: number; users: number; queue: number; history: number; alerts: number; apps: number; audit_logs: number } {
+    const s = getStore();
+    return {
+      data_tag: s.data_tag,
+      templates: s.templates.length,
+      users: s.users.length,
+      queue: s.messageQueue.length,
+      history: s.sendHistory.length,
+      alerts: s.alerts.length,
+      apps: s.apps.length,
+      audit_logs: s.auditLogs.length
+    };
+  },
+  clearByTag(tag: DataTag): { cleared: string[] } {
+    const s = getStore();
+    const cleared: string[] = [];
+    if (tag === 'test' || tag === 'demo') {
+      s.messageQueue = [];
+      s.sendHistory = [];
+      s.alerts = [];
+      s.backlogSnapshots = [];
+      s.auditLogs = [];
+      s.latencyRecords = [];
+      cleared.push('messageQueue', 'sendHistory', 'alerts', 'backlogSnapshots', 'auditLogs', 'latencyRecords');
+      if (tag === 'test') {
+        s.templates = [];
+        s.templateContents = [];
+        s.users = [];
+        s.userPreferences = [];
+        s.apps = [];
+        cleared.push('templates', 'templateContents', 'users', 'userPreferences', 'apps');
+      }
+    }
+    s.data_tag = 'production';
+    scheduleSave();
+    saveToFile();
+    return { cleared };
+  },
+  clearAll(): { cleared: string[] } {
+    const s = getStore();
+    s.templates = [];
+    s.templateContents = [];
+    s.users = [];
+    s.userPreferences = [];
+    s.messageQueue = [];
+    s.sendHistory = [];
+    s.alerts = [];
+    s.apps = [];
+    s.backlogSnapshots = [];
+    s.auditLogs = [];
+    s.latencyRecords = [];
+    s.data_tag = 'production';
+    scheduleSave();
+    saveToFile();
+    return { cleared: ['all'] };
+  },
+  exportBackup(): object {
+    return JSON.parse(JSON.stringify(getStore()));
+  },
+  importBackup(data: any): { imported: string[] } {
+    if (!data || typeof data !== 'object') throw new Error('Invalid backup data');
+    const s = getStore();
+    const imported: string[] = [];
+    const keys: (keyof DataStore)[] = ['data_tag', 'templates', 'templateContents', 'users', 'userPreferences', 'messageQueue', 'sendHistory', 'alerts', 'apps', 'backlogSnapshots', 'auditLogs', 'latencyRecords'];
+    for (const key of keys) {
+      if (Array.isArray(data[key]) || (key === 'data_tag' && typeof data[key] === 'string')) {
+        (s as any)[key] = data[key];
+        imported.push(key);
+      }
+    }
+    const nextId = Math.max(
+      s.templateContents.reduce((m, t) => Math.max(m, t.id || 0), 0),
+      s.userPreferences.reduce((m, p) => Math.max(m, p.id || 0), 0),
+      s.alerts.reduce((m, a) => Math.max(m, a.id || 0), 0),
+      s.auditLogs.reduce((m, a) => Math.max(m, a.id || 0), 0)
+    ) + 1;
+    autoIdCounter = nextId;
+    scheduleSave();
+    saveToFile();
+    return { imported };
   }
 };
 

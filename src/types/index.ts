@@ -120,13 +120,17 @@ export interface ChannelAdapter {
   send(recipient: string, subject: string | undefined, content: string, params?: Record<string, any>): Promise<ChannelResult>;
 }
 
+export type DataTag = 'production' | 'demo' | 'test';
+
 export interface DeliveryStats {
   total: number;
   sent: number;
   delivered: number;
   failed: number;
+  cancelled: number;
   delivery_rate: number;
   success_rate: number;
+  cancel_rate: number;
 }
 
 export interface Alert {
