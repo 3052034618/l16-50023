@@ -17,6 +17,7 @@ export class QueueService {
     app_id?: string;
     rendered_subject?: string;
     rendered_content?: string;
+    template_version?: number;
   }): QueueMessage {
     return queueRepo.enqueue(data);
   }
@@ -31,6 +32,18 @@ export class QueueService {
 
   updateStatus(id: string, status: MessageStatus, errorMessage?: string): void {
     queueRepo.updateStatus(id, status, errorMessage);
+  }
+
+  cancelMessage(id: string): QueueMessage | undefined {
+    return queueRepo.cancel(id);
+  }
+
+  rescheduleMessage(id: string, scheduled_at: number): QueueMessage | undefined {
+    return queueRepo.reschedule(id, scheduled_at);
+  }
+
+  updateMessageContent(id: string, data: { rendered_subject?: string; rendered_content?: string }): QueueMessage | undefined {
+    return queueRepo.updateContent(id, data);
   }
 
   incrementRetry(id: string, errorMessage: string): boolean {

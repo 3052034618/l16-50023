@@ -40,6 +40,47 @@ router.get('/:id', (req: Request, res: Response) => {
   }
 });
 
+router.post('/:id/cancel', (req: Request, res: Response) => {
+  try {
+    const msg = queueService.cancelMessage(req.params.id);
+    if (!msg) {
+      return res.status(400).json({ error: 'Message not found or not in pending status' });
+    }
+    res.json(msg);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/reschedule', (req: Request, res: Response) => {
+  try {
+    const { scheduled_at } = req.body;
+    if (!scheduled_at) {
+      return res.status(400).json({ error: 'scheduled_at is required' });
+    }
+    const msg = queueService.rescheduleMessage(req.params.id, scheduled_at);
+    if (!msg) {
+      return res.status(400).json({ error: 'Message not found or not in pending status' });
+    }
+    res.json(msg);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.patch('/:id/content', (req: Request, res: Response) => {
+  try {
+    const { rendered_subject, rendered_content } = req.body;
+    const msg = queueService.updateMessageContent(req.params.id, { rendered_subject, rendered_content });
+    if (!msg) {
+      return res.status(400).json({ error: 'Message not found or not in pending status' });
+    }
+    res.json(msg);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.delete('/:id', (req: Request, res: Response) => {
   try {
     const success = queueService.removeMessage(req.params.id);

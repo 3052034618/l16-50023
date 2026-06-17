@@ -3,7 +3,7 @@ import { alertService } from '../services/alertService';
 import { queueService } from '../services/queueService';
 import { historyService } from '../services/historyService';
 import { channelManager } from '../channels/channelManager';
-import { backlogSnapshotRepo } from '../database/store';
+import { backlogSnapshotRepo, channelRuntimeRepo, latencyRepo, auditLogRepo } from '../database/store';
 import { AlertLevel, ChannelType } from '../types';
 
 const router = Router();
@@ -18,6 +18,8 @@ router.get('/overview', (req: Request, res: Response) => {
     const channelStats = channels.map(channel => {
       const queueStat = queueStats.byChannel.find(c => c.channel === channel);
       const historyStat = historyService.getDeliveryStats({ channel });
+      const circuitState = channelRuntimeRepo.getCircuitState(channel);
+      const rateLimiterState = channelRuntimeRepo.getRateLimiterState(channel);
       return {
         channel,
         queue: {
@@ -26,7 +28,17 @@ router.get('/overview', (req: Request, res: Response) => {
           failed: queueStat?.failed || 0,
           total: queueStat?.total || 0
         },
-        delivery: historyStat
+        delivery: historyStat,
+        circuit_breaker: {
+          state: circuitState.state,
+          failure_count: circuitState.failure_count,
+          threshold: circuitState.threshold
+        },
+        rate_limiter: {
+          max_rps: rateLimiterState.max_rps,
+          total_allowed: rateLimiterState.total_allowed,
+          total_rejected: rateLimiterState.total_rejected
+        }
       };
     });
 
@@ -85,6 +97,55 @@ router.get('/failure-reasons', (req: Request, res: Response) => {
       limit: limit ? parseInt(limit as string) : undefined
     });
     res.json(reasons);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/latency', (req: Request, res: Response) => {
+  try {
+    const { channel, since } = req.query;
+    const distribution = latencyRepo.getDistribution({
+      channel: channel as ChannelType | undefined,
+      since: since ? parseInt(since as string) : undefined
+    });
+    res.json(distribution);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/circuit-breakers', (req: Request, res: Response) => {
+  try {
+    const states = channelRuntimeRepo.getAllCircuitStates();
+    res.json(states);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/circuit-breakers/:channel', (req: Request, res: Response) => {
+  try {
+    const state = channelRuntimeRepo.getCircuitState(req.params.channel as ChannelType);
+    res.json(state);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/circuit-breakers/:channel/reset', (req: Request, res: Response) => {
+  try {
+    channelRuntimeRepo.resetCircuit(req.params.channel as ChannelType);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/rate-limiters', (req: Request, res: Response) => {
+  try {
+    const states = channelRuntimeRepo.getAllRateLimiterStates();
+    res.json(states);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

@@ -2,9 +2,11 @@ export type ChannelType = 'email' | 'sms' | 'inapp' | 'webhook';
 
 export type PriorityType = 'low' | 'normal' | 'high' | 'urgent';
 
-export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed';
+export type MessageStatus = 'pending' | 'sending' | 'sent' | 'delivered' | 'failed' | 'cancelled';
 
 export type AlertLevel = 'info' | 'warning' | 'critical';
+
+export type TemplateStatus = 'draft' | 'published';
 
 export interface Template {
   id: string;
@@ -12,6 +14,8 @@ export interface Template {
   description?: string;
   category: string;
   priority: PriorityType;
+  status: TemplateStatus;
+  current_version: number;
   created_at: number;
   updated_at: number;
 }
@@ -23,6 +27,7 @@ export interface TemplateContent {
   channel: ChannelType;
   subject?: string;
   content: string;
+  version: number;
   created_at: number;
   updated_at: number;
 }
@@ -65,6 +70,7 @@ export interface QueueMessage {
   app_id?: string;
   rendered_subject?: string;
   rendered_content?: string;
+  template_version?: number;
 }
 
 export interface SendHistory {
@@ -140,6 +146,7 @@ export interface AppClient {
   secret: string;
   description?: string;
   enabled: boolean;
+  ip_whitelist: string[];
   created_at: number;
   updated_at: number;
 }
@@ -157,4 +164,48 @@ export interface FailureReasonEntry {
   count: number;
   latest_at: number;
   channel: ChannelType;
+}
+
+export interface AuditLog {
+  id: number;
+  app_id: string;
+  action: string;
+  endpoint: string;
+  ip: string;
+  status: 'success' | 'auth_failed' | 'ip_blocked' | 'error';
+  error_message?: string;
+  created_at: number;
+}
+
+export interface LatencyBucket {
+  channel: ChannelType;
+  p50: number;
+  p90: number;
+  p99: number;
+  max: number;
+  avg: number;
+  count: number;
+}
+
+export type CircuitState = 'closed' | 'open' | 'half_open';
+
+export interface CircuitBreakerState {
+  channel: ChannelType;
+  state: CircuitState;
+  failure_count: number;
+  success_count: number;
+  last_failure_at?: number;
+  last_state_change_at: number;
+  half_open_attempts: number;
+  threshold: number;
+  reset_timeout_ms: number;
+}
+
+export interface RateLimiterState {
+  channel: ChannelType;
+  max_rps: number;
+  current_tokens: number;
+  total_allowed: number;
+  total_rejected: number;
+  last_refill_at: number;
 }

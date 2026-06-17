@@ -4,6 +4,7 @@ import { userService } from './userService';
 import { queueService } from './queueService';
 import { historyService } from './historyService';
 import { channelManager } from '../channels/channelManager';
+import { channelRuntimeRepo, latencyRepo } from '../database/store';
 import { v4 as uuidv4 } from 'uuid';
 
 const HIGH_PRIORITY_CATEGORIES = ['security', 'verification'];
@@ -70,7 +71,8 @@ export class PushService {
         request.template_id,
         language,
         channel,
-        request.params
+        request.params,
+        template.current_version
       );
       if (!rendered) {
         continue;
@@ -87,7 +89,8 @@ export class PushService {
         language,
         app_id: request.app_id,
         rendered_subject: rendered.subject,
-        rendered_content: rendered.content
+        rendered_content: rendered.content,
+        template_version: template.current_version
       });
 
       results.push({
@@ -105,6 +108,14 @@ export class PushService {
     let processed = 0;
 
     for (const msg of messages) {
+      if (!channelRuntimeRepo.checkCircuit(msg.channel)) {
+        continue;
+      }
+
+      if (!channelRuntimeRepo.acquireToken(msg.channel)) {
+        continue;
+      }
+
       try {
         queueService.updateStatus(msg.id, 'sending');
         const startTime = Date.now();
@@ -133,9 +144,12 @@ export class PushService {
         const endTime = Date.now();
         const duration = endTime - startTime;
 
+        latencyRepo.record(msg.channel, duration);
+
         if (result.success) {
           const finalStatus = result.delivered ? 'delivered' : 'sent';
           queueService.updateStatus(msg.id, finalStatus as MessageStatus);
+          channelRuntimeRepo.recordSuccess(msg.channel);
 
           historyService.record({
             id: msg.id,
@@ -160,6 +174,7 @@ export class PushService {
 
           queueService.removeMessage(msg.id);
         } else {
+          channelRuntimeRepo.recordFailure(msg.channel);
           const willRetry = queueService.incrementRetry(msg.id, result.error || 'Unknown error');
           if (!willRetry) {
             historyService.record({
@@ -186,6 +201,7 @@ export class PushService {
           }
         }
       } catch (error: any) {
+        channelRuntimeRepo.recordFailure(msg.channel);
         const willRetry = queueService.incrementRetry(msg.id, error.message);
         if (!willRetry) {
           const template = templateService.getTemplate(msg.template_id);

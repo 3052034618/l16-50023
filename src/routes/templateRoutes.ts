@@ -10,12 +10,7 @@ router.post('/', (req: Request, res: Response) => {
     if (!name) {
       return res.status(400).json({ error: 'name is required' });
     }
-    const template = templateService.createTemplate({
-      name,
-      description,
-      category,
-      priority
-    });
+    const template = templateService.createTemplate({ name, description, category, priority });
     res.json(template);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -24,9 +19,10 @@ router.post('/', (req: Request, res: Response) => {
 
 router.get('/', (req: Request, res: Response) => {
   try {
-    const { category, page, pageSize } = req.query;
+    const { category, status, page, pageSize } = req.query;
     const result = templateService.listTemplates({
       category: category as string | undefined,
+      status: status as string | undefined,
       page: page ? parseInt(page as string) : undefined,
       pageSize: pageSize ? parseInt(pageSize as string) : undefined
     });
@@ -55,6 +51,67 @@ router.put('/:id', (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Template not found' });
     }
     res.json(template);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/publish', (req: Request, res: Response) => {
+  try {
+    const template = templateService.publishTemplate(req.params.id);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    res.json(template);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/unpublish', (req: Request, res: Response) => {
+  try {
+    const template = templateService.unpublishTemplate(req.params.id);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    res.json(template);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/new-version', (req: Request, res: Response) => {
+  try {
+    const template = templateService.newVersion(req.params.id);
+    if (!template) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+    res.json(template);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/:id/rollback', (req: Request, res: Response) => {
+  try {
+    const { version } = req.body;
+    if (!version) {
+      return res.status(400).json({ error: 'version is required' });
+    }
+    const template = templateService.rollbackVersion(req.params.id, version);
+    if (!template) {
+      return res.status(400).json({ error: 'Template not found or version does not exist' });
+    }
+    res.json(template);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/:id/versions', (req: Request, res: Response) => {
+  try {
+    const versions = templateService.getVersions(req.params.id);
+    res.json(versions);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -93,7 +150,11 @@ router.post('/:id/contents', (req: Request, res: Response) => {
 
 router.get('/:id/contents', (req: Request, res: Response) => {
   try {
-    const contents = templateService.getTemplateContents(req.params.id);
+    const { version } = req.query;
+    const contents = templateService.getTemplateContents(
+      req.params.id,
+      version ? parseInt(version as string) : undefined
+    );
     res.json(contents);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -102,7 +163,7 @@ router.get('/:id/contents', (req: Request, res: Response) => {
 
 router.post('/:id/render', (req: Request, res: Response) => {
   try {
-    const { language, channel, params } = req.body;
+    const { language, channel, params, version } = req.body;
     if (!language || !channel) {
       return res.status(400).json({ error: 'language and channel are required' });
     }
@@ -110,7 +171,8 @@ router.post('/:id/render', (req: Request, res: Response) => {
       req.params.id,
       language,
       channel as ChannelType,
-      params || {}
+      params || {},
+      version
     );
     if (!result) {
       return res.status(404).json({ error: 'Template content not found' });

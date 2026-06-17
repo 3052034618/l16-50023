@@ -15,11 +15,11 @@ export class TemplateService {
     return templateRepo.get(id);
   }
 
-  listTemplates(params?: { category?: string; page?: number; pageSize?: number }): {
+  listTemplates(params?: { category?: string; status?: string; page?: number; pageSize?: number }): {
     items: Template[];
     total: number;
   } {
-    return templateRepo.list(params);
+    return templateRepo.list(params as any);
   }
 
   updateTemplate(id: string, data: {
@@ -29,6 +29,36 @@ export class TemplateService {
     priority?: string;
   }): Template | undefined {
     return templateRepo.update(id, data);
+  }
+
+  publishTemplate(id: string): Template | undefined {
+    return templateRepo.publish(id);
+  }
+
+  unpublishTemplate(id: string): Template | undefined {
+    return templateRepo.unpublish(id);
+  }
+
+  newVersion(id: string): Template | undefined {
+    const t = templateRepo.get(id);
+    if (!t) return undefined;
+    t.current_version += 1;
+    t.updated_at = Date.now();
+    return t;
+  }
+
+  rollbackVersion(id: string, targetVersion: number): Template | undefined {
+    const t = templateRepo.get(id);
+    if (!t) return undefined;
+    const versions = templateContentRepo.getVersions(id);
+    if (!versions.includes(targetVersion)) return undefined;
+    t.current_version = targetVersion;
+    t.updated_at = Date.now();
+    return t;
+  }
+
+  getVersions(template_id: string): number[] {
+    return templateContentRepo.getVersions(template_id);
   }
 
   deleteTemplate(id: string): boolean {
@@ -53,8 +83,8 @@ export class TemplateService {
     return templateContentRepo.get(template_id, language, channel);
   }
 
-  getTemplateContents(template_id: string): TemplateContent[] {
-    return templateContentRepo.listByTemplate(template_id);
+  getTemplateContents(template_id: string, version?: number): TemplateContent[] {
+    return templateContentRepo.listByTemplate(template_id, version);
   }
 
   deleteTemplateContent(id: number): boolean {
@@ -65,9 +95,10 @@ export class TemplateService {
     template_id: string,
     language: string,
     channel: ChannelType,
-    params: Record<string, any> = {}
+    params: Record<string, any> = {},
+    version?: number
   ): { subject?: string; content: string } | undefined {
-    const content = templateContentRepo.findBestMatch(template_id, language, channel);
+    const content = templateContentRepo.findBestMatch(template_id, language, channel, version);
     if (!content) return undefined;
 
     const subject = content.subject ? this.replaceVariables(content.subject, params) : undefined;

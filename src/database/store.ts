@@ -1,4 +1,4 @@
-import { Template, TemplateContent, User, UserPreference, QueueMessage, SendHistory, Alert, AppClient, ChannelType, PriorityType, MessageStatus, AlertLevel, BacklogSnapshot, FailureReasonEntry, DeliveryStats } from '../types';
+import { Template, TemplateContent, TemplateStatus, User, UserPreference, QueueMessage, SendHistory, Alert, AppClient, ChannelType, PriorityType, MessageStatus, AlertLevel, BacklogSnapshot, FailureReasonEntry, DeliveryStats, AuditLog, CircuitBreakerState, CircuitState, RateLimiterState, LatencyBucket } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,6 +13,8 @@ interface DataStore {
   alerts: Alert[];
   apps: AppClient[];
   backlogSnapshots: BacklogSnapshot[];
+  auditLogs: AuditLog[];
+  latencyRecords: { channel: ChannelType; duration_ms: number; created_at: number }[];
 }
 
 let store: DataStore;
@@ -65,10 +67,23 @@ function loadFromFile(): boolean {
       store.alerts = Array.isArray(data.alerts) ? data.alerts : [];
       store.apps = Array.isArray(data.apps) ? data.apps : [];
       store.backlogSnapshots = Array.isArray(data.backlogSnapshots) ? data.backlogSnapshots : [];
+      store.auditLogs = Array.isArray(data.auditLogs) ? data.auditLogs : [];
+      store.latencyRecords = Array.isArray(data.latencyRecords) ? data.latencyRecords : [];
+      for (const t of store.templates) {
+        if (t.status === undefined) t.status = 'published';
+        if (t.current_version === undefined) t.current_version = 1;
+      }
+      for (const tc of store.templateContents) {
+        if (tc.version === undefined) tc.version = 1;
+      }
+      for (const app of store.apps) {
+        if (app.ip_whitelist === undefined) app.ip_whitelist = [];
+      }
       const nextId = Math.max(
         store.templateContents.reduce((m, t) => Math.max(m, t.id || 0), 0),
         store.userPreferences.reduce((m, p) => Math.max(m, p.id || 0), 0),
-        store.alerts.reduce((m, a) => Math.max(m, a.id || 0), 0)
+        store.alerts.reduce((m, a) => Math.max(m, a.id || 0), 0),
+        store.auditLogs.reduce((m, a) => Math.max(m, a.id || 0), 0)
       ) + 1;
       autoIdCounter = nextId;
       console.log(`[Persistence] Loaded data: ${store.templates.length} templates, ${store.users.length} users, ${store.sendHistory.length} history, ${store.apps.length} apps`);
@@ -95,7 +110,9 @@ export function initDatabase(dbPath?: string): DataStore {
     sendHistory: [],
     alerts: [],
     apps: [],
-    backlogSnapshots: []
+    backlogSnapshots: [],
+    auditLogs: [],
+    latencyRecords: []
   };
 
   if (dbPath && dbPath !== ':memory:') {
@@ -129,6 +146,7 @@ export const templateRepo = {
     const t: Template = {
       id: generateId(), name: data.name, description: data.description,
       category: data.category || 'general', priority: (data.priority || 'normal') as PriorityType,
+      status: 'draft' as TemplateStatus, current_version: 1,
       created_at: now(), updated_at: now()
     };
     getStore().templates.push(t);
@@ -138,9 +156,10 @@ export const templateRepo = {
   get(id: string): Template | undefined {
     return getStore().templates.find(t => t.id === id);
   },
-  list(params?: { category?: string; page?: number; pageSize?: number }): { items: Template[]; total: number } {
+  list(params?: { category?: string; status?: TemplateStatus; page?: number; pageSize?: number }): { items: Template[]; total: number } {
     let items = [...getStore().templates];
     if (params?.category) items = items.filter(t => t.category === params.category);
+    if (params?.status) items = items.filter(t => t.status === params.status);
     items.sort((a, b) => b.created_at - a.created_at);
     const total = items.length;
     const page = params?.page || 1;
@@ -158,6 +177,22 @@ export const templateRepo = {
     scheduleSave();
     return t;
   },
+  publish(id: string): Template | undefined {
+    const t = this.get(id);
+    if (!t) return undefined;
+    t.status = 'published';
+    t.updated_at = now();
+    scheduleSave();
+    return t;
+  },
+  unpublish(id: string): Template | undefined {
+    const t = this.get(id);
+    if (!t) return undefined;
+    t.status = 'draft';
+    t.updated_at = now();
+    scheduleSave();
+    return t;
+  },
   delete(id: string): boolean {
     const idx = getStore().templates.findIndex(t => t.id === id);
     if (idx === -1) return false;
@@ -168,9 +203,11 @@ export const templateRepo = {
 };
 
 export const templateContentRepo = {
-  upsert(data: { template_id: string; language: string; channel: ChannelType; subject?: string; content: string }): TemplateContent {
+  upsert(data: { template_id: string; language: string; channel: ChannelType; subject?: string; content: string; version?: number }): TemplateContent {
+    const tpl = templateRepo.get(data.template_id);
+    const ver = data.version ?? (tpl ? tpl.current_version : 1);
     const existing = getStore().templateContents.find(
-      tc => tc.template_id === data.template_id && tc.language === data.language && tc.channel === data.channel
+      tc => tc.template_id === data.template_id && tc.language === data.language && tc.channel === data.channel && tc.version === ver
     );
     if (existing) {
       if (data.subject !== undefined) existing.subject = data.subject;
@@ -181,22 +218,33 @@ export const templateContentRepo = {
     }
     const tc: TemplateContent = {
       id: nextAutoId(), template_id: data.template_id, language: data.language,
-      channel: data.channel, subject: data.subject, content: data.content,
+      channel: data.channel, subject: data.subject, content: data.content, version: ver,
       created_at: now(), updated_at: now()
     };
     getStore().templateContents.push(tc);
     scheduleSave();
     return tc;
   },
-  get(template_id: string, language: string, channel: ChannelType): TemplateContent | undefined {
+  get(template_id: string, language: string, channel: ChannelType, version?: number): TemplateContent | undefined {
+    const tpl = templateRepo.get(template_id);
+    const ver = version ?? (tpl ? tpl.current_version : undefined);
+    if (ver !== undefined) {
+      return getStore().templateContents.find(
+        tc => tc.template_id === template_id && tc.language === language && tc.channel === channel && tc.version === ver
+      );
+    }
     return getStore().templateContents.find(
       tc => tc.template_id === template_id && tc.language === language && tc.channel === channel
     );
   },
-  listByTemplate(template_id: string): TemplateContent[] {
-    return getStore().templateContents
-      .filter(tc => tc.template_id === template_id)
-      .sort((a, b) => a.language.localeCompare(b.language) || a.channel.localeCompare(b.channel));
+  listByTemplate(template_id: string, version?: number): TemplateContent[] {
+    let items = getStore().templateContents.filter(tc => tc.template_id === template_id);
+    if (version !== undefined) items = items.filter(tc => tc.version === version);
+    return items.sort((a, b) => a.language.localeCompare(b.language) || a.channel.localeCompare(b.channel));
+  },
+  getVersions(template_id: string): number[] {
+    const versions = new Set(getStore().templateContents.filter(tc => tc.template_id === template_id).map(tc => tc.version));
+    return Array.from(versions).sort((a, b) => b - a);
   },
   delete(id: number): boolean {
     const idx = getStore().templateContents.findIndex(tc => tc.id === id);
@@ -205,8 +253,16 @@ export const templateContentRepo = {
     scheduleSave();
     return true;
   },
-  findBestMatch(template_id: string, language: string, channel: ChannelType): TemplateContent | undefined {
-    const all = getStore().templateContents.filter(tc => tc.template_id === template_id && tc.channel === channel);
+  findBestMatch(template_id: string, language: string, channel: ChannelType, version?: number): TemplateContent | undefined {
+    const tpl = templateRepo.get(template_id);
+    const ver = version ?? (tpl ? tpl.current_version : undefined);
+    let all = getStore().templateContents.filter(tc => tc.template_id === template_id && tc.channel === channel);
+    if (ver !== undefined) {
+      all = all.filter(tc => tc.version === ver);
+    } else {
+      const maxVer = all.reduce((m, tc) => Math.max(m, tc.version), 0);
+      all = all.filter(tc => tc.version === maxVer);
+    }
     if (all.length === 0) return undefined;
     return all.find(tc => tc.language === language) || all.find(tc => tc.language === 'en') || all[0];
   }
@@ -293,7 +349,7 @@ export const queueRepo = {
     template_id: string; user_id?: string; recipient?: string; channel: ChannelType;
     priority?: PriorityType; params?: Record<string, any>; scheduled_at?: number;
     max_retries?: number; language: string; app_id?: string;
-    rendered_subject?: string; rendered_content?: string;
+    rendered_subject?: string; rendered_content?: string; template_version?: number;
   }): QueueMessage {
     const msg: QueueMessage = {
       id: generateId(), template_id: data.template_id, user_id: data.user_id,
@@ -302,7 +358,8 @@ export const queueRepo = {
       retry_count: 0, max_retries: data.max_retries ?? 3,
       params: data.params, scheduled_at: data.scheduled_at || now(),
       created_at: now(), language: data.language, app_id: data.app_id,
-      rendered_subject: data.rendered_subject, rendered_content: data.rendered_content
+      rendered_subject: data.rendered_subject, rendered_content: data.rendered_content,
+      template_version: data.template_version
     };
     getStore().messageQueue.push(msg);
     scheduleSave();
@@ -329,6 +386,31 @@ export const queueRepo = {
     }
     if (errorMessage) msg.error_message = errorMessage;
     scheduleSave();
+  },
+  cancel(id: string): QueueMessage | undefined {
+    const msg = this.get(id);
+    if (!msg) return undefined;
+    if (msg.status !== 'pending') return undefined;
+    msg.status = 'cancelled';
+    scheduleSave();
+    return msg;
+  },
+  reschedule(id: string, scheduled_at: number): QueueMessage | undefined {
+    const msg = this.get(id);
+    if (!msg) return undefined;
+    if (msg.status !== 'pending') return undefined;
+    msg.scheduled_at = scheduled_at;
+    scheduleSave();
+    return msg;
+  },
+  updateContent(id: string, data: { rendered_subject?: string; rendered_content?: string }): QueueMessage | undefined {
+    const msg = this.get(id);
+    if (!msg) return undefined;
+    if (msg.status !== 'pending') return undefined;
+    if (data.rendered_subject !== undefined) msg.rendered_subject = data.rendered_subject;
+    if (data.rendered_content !== undefined) msg.rendered_content = data.rendered_content;
+    scheduleSave();
+    return msg;
   },
   incrementRetry(id: string, errorMessage: string, retryDelay: number): boolean {
     const msg = this.get(id);
@@ -576,10 +658,11 @@ export const alertRepo = {
 };
 
 export const appRepo = {
-  create(data: { name: string; description?: string }): AppClient {
+  create(data: { name: string; description?: string; ip_whitelist?: string[] }): AppClient {
     const app: AppClient = {
       id: generateId(), name: data.name, secret: generateId(),
       description: data.description, enabled: true,
+      ip_whitelist: data.ip_whitelist || [],
       created_at: now(), updated_at: now()
     };
     getStore().apps.push(app);
@@ -593,6 +676,12 @@ export const appRepo = {
     const app = getStore().apps.find(a => a.id === id && a.secret === secret && a.enabled);
     return app;
   },
+  checkIp(appId: string, ip: string): boolean {
+    const app = this.get(appId);
+    if (!app) return false;
+    if (!app.ip_whitelist || app.ip_whitelist.length === 0) return true;
+    return app.ip_whitelist.includes(ip);
+  },
   list(params?: { page?: number; pageSize?: number }): { items: AppClient[]; total: number } {
     let items = [...getStore().apps].sort((a, b) => b.created_at - a.created_at);
     const total = items.length;
@@ -600,12 +689,13 @@ export const appRepo = {
     const pageSize = params?.pageSize || 20;
     return { items: items.slice((page - 1) * pageSize, page * pageSize), total };
   },
-  update(id: string, data: { name?: string; description?: string; enabled?: boolean }): AppClient | undefined {
+  update(id: string, data: { name?: string; description?: string; enabled?: boolean; ip_whitelist?: string[] }): AppClient | undefined {
     const app = this.get(id);
     if (!app) return undefined;
     if (data.name !== undefined) app.name = data.name;
     if (data.description !== undefined) app.description = data.description;
     if (data.enabled !== undefined) app.enabled = data.enabled;
+    if (data.ip_whitelist !== undefined) app.ip_whitelist = data.ip_whitelist;
     app.updated_at = now();
     scheduleSave();
     return app;
@@ -627,6 +717,58 @@ export const appRepo = {
   }
 };
 
+export const auditLogRepo = {
+  record(data: { app_id: string; action: string; endpoint: string; ip: string; status: AuditLog['status']; error_message?: string }): AuditLog {
+    const log: AuditLog = {
+      id: nextAutoId(), app_id: data.app_id, action: data.action,
+      endpoint: data.endpoint, ip: data.ip, status: data.status,
+      error_message: data.error_message, created_at: now()
+    };
+    getStore().auditLogs.push(log);
+    const oneWeekAgo = now() - 7 * 24 * 60 * 60 * 1000;
+    if (getStore().auditLogs.length > 10000) {
+      getStore().auditLogs = getStore().auditLogs.filter(l => l.created_at > oneWeekAgo);
+    }
+    scheduleSave();
+    return log;
+  },
+  list(params?: {
+    app_id?: string; action?: string; status?: AuditLog['status'];
+    start_time?: number; end_time?: number;
+    page?: number; pageSize?: number;
+  }): { items: AuditLog[]; total: number } {
+    let items = [...getStore().auditLogs];
+    if (params?.app_id) items = items.filter(l => l.app_id === params.app_id);
+    if (params?.action) items = items.filter(l => l.action === params.action);
+    if (params?.status) items = items.filter(l => l.status === params.status);
+    if (params?.start_time) items = items.filter(l => l.created_at >= params.start_time!);
+    if (params?.end_time) items = items.filter(l => l.created_at <= params.end_time!);
+    items.sort((a, b) => b.created_at - a.created_at);
+    const total = items.length;
+    const page = params?.page || 1;
+    const pageSize = params?.pageSize || 20;
+    return { items: items.slice((page - 1) * pageSize, page * pageSize), total };
+  },
+  statsByApp(params?: { start_time?: number; end_time?: number }): {
+    app_id: string; total_calls: number; success: number; auth_failed: number; ip_blocked: number; errors: number;
+  }[] {
+    const map = new Map<string, { app_id: string; total_calls: number; success: number; auth_failed: number; ip_blocked: number; errors: number }>();
+    let items = getStore().auditLogs;
+    if (params?.start_time) items = items.filter(l => l.created_at >= params.start_time!);
+    if (params?.end_time) items = items.filter(l => l.created_at <= params.end_time!);
+    for (const l of items) {
+      if (!map.has(l.app_id)) map.set(l.app_id, { app_id: l.app_id, total_calls: 0, success: 0, auth_failed: 0, ip_blocked: 0, errors: 0 });
+      const e = map.get(l.app_id)!;
+      e.total_calls++;
+      if (l.status === 'success') e.success++;
+      else if (l.status === 'auth_failed') e.auth_failed++;
+      else if (l.status === 'ip_blocked') e.ip_blocked++;
+      else if (l.status === 'error') e.errors++;
+    }
+    return Array.from(map.values()).sort((a, b) => b.total_calls - a.total_calls);
+  }
+};
+
 export const backlogSnapshotRepo = {
   capture(): BacklogSnapshot[] {
     const stats = queueRepo.stats();
@@ -637,7 +779,6 @@ export const backlogSnapshotRepo = {
     }));
     getStore().backlogSnapshots.push(...snapshots);
     const oneDayAgo = ts - 24 * 60 * 60 * 1000;
-    const before = getStore().backlogSnapshots.length;
     getStore().backlogSnapshots = getStore().backlogSnapshots.filter(s => s.timestamp > oneDayAgo);
     scheduleSave();
     return snapshots;
@@ -650,11 +791,172 @@ export const backlogSnapshotRepo = {
   }
 };
 
+export const latencyRepo = {
+  record(channel: ChannelType, durationMs: number): void {
+    getStore().latencyRecords.push({ channel, duration_ms: durationMs, created_at: now() });
+    const oneDayAgo = now() - 24 * 60 * 60 * 1000;
+    if (getStore().latencyRecords.length > 50000) {
+      getStore().latencyRecords = getStore().latencyRecords.filter(r => r.created_at > oneDayAgo);
+    }
+    scheduleSave();
+  },
+  getDistribution(params?: { channel?: ChannelType; since?: number }): LatencyBucket[] {
+    const channels: ChannelType[] = params?.channel ? [params.channel] : ['email', 'sms', 'inapp', 'webhook'];
+    let items = getStore().latencyRecords;
+    if (params?.since) items = items.filter(r => r.created_at >= params.since!);
+    return channels.map(channel => {
+      const durations = items.filter(r => r.channel === channel).map(r => r.duration_ms).sort((a, b) => a - b);
+      const count = durations.length;
+      if (count === 0) {
+        return { channel, p50: 0, p90: 0, p99: 0, max: 0, avg: 0, count: 0 };
+      }
+      const percentile = (arr: number[], p: number) => arr[Math.min(Math.floor(arr.length * p), arr.length - 1)];
+      const sum = durations.reduce((a, b) => a + b, 0);
+      return {
+        channel,
+        p50: percentile(durations, 0.5),
+        p90: percentile(durations, 0.9),
+        p99: percentile(durations, 0.99),
+        max: durations[durations.length - 1],
+        avg: Math.round(sum / count),
+        count
+      };
+    });
+  }
+};
+
+const circuitBreakers = new Map<ChannelType, CircuitBreakerState>();
+const rateLimiters = new Map<ChannelType, RateLimiterState>();
+
+const defaultCircuitConfig: Record<ChannelType, { threshold: number; reset_timeout_ms: number }> = {
+  email: { threshold: 5, reset_timeout_ms: 30000 },
+  sms: { threshold: 5, reset_timeout_ms: 30000 },
+  inapp: { threshold: 5, reset_timeout_ms: 30000 },
+  webhook: { threshold: 5, reset_timeout_ms: 30000 }
+};
+
+const defaultRateLimitConfig: Record<ChannelType, number> = {
+  email: 100,
+  sms: 50,
+  inapp: 200,
+  webhook: 100
+};
+
+function initCircuitBreaker(channel: ChannelType): CircuitBreakerState {
+  if (!circuitBreakers.has(channel)) {
+    circuitBreakers.set(channel, {
+      channel,
+      state: 'closed',
+      failure_count: 0,
+      success_count: 0,
+      last_state_change_at: now(),
+      half_open_attempts: 0,
+      threshold: defaultCircuitConfig[channel].threshold,
+      reset_timeout_ms: defaultCircuitConfig[channel].reset_timeout_ms
+    });
+  }
+  return circuitBreakers.get(channel)!;
+}
+
+function initRateLimiter(channel: ChannelType): RateLimiterState {
+  if (!rateLimiters.has(channel)) {
+    rateLimiters.set(channel, {
+      channel,
+      max_rps: defaultRateLimitConfig[channel],
+      current_tokens: defaultRateLimitConfig[channel],
+      total_allowed: 0,
+      total_rejected: 0,
+      last_refill_at: now()
+    });
+  }
+  return rateLimiters.get(channel)!;
+}
+
+export const channelRuntimeRepo = {
+  getCircuitState(channel: ChannelType): CircuitBreakerState {
+    return initCircuitBreaker(channel);
+  },
+  getAllCircuitStates(): CircuitBreakerState[] {
+    const channels: ChannelType[] = ['email', 'sms', 'inapp', 'webhook'];
+    return channels.map(ch => initCircuitBreaker(ch));
+  },
+  recordSuccess(channel: ChannelType): void {
+    const cb = initCircuitBreaker(channel);
+    cb.success_count++;
+    if (cb.state === 'half_open') {
+      cb.state = 'closed';
+      cb.failure_count = 0;
+      cb.last_state_change_at = now();
+    }
+  },
+  recordFailure(channel: ChannelType): void {
+    const cb = initCircuitBreaker(channel);
+    cb.failure_count++;
+    cb.last_failure_at = now();
+    if (cb.state === 'half_open') {
+      cb.state = 'open';
+      cb.last_state_change_at = now();
+    } else if (cb.state === 'closed' && cb.failure_count >= cb.threshold) {
+      cb.state = 'open';
+      cb.last_state_change_at = now();
+    }
+  },
+  checkCircuit(channel: ChannelType): boolean {
+    const cb = initCircuitBreaker(channel);
+    if (cb.state === 'closed') return true;
+    if (cb.state === 'open') {
+      if (now() - cb.last_state_change_at >= cb.reset_timeout_ms) {
+        cb.state = 'half_open';
+        cb.half_open_attempts = 0;
+        cb.last_state_change_at = now();
+        return true;
+      }
+      return false;
+    }
+    if (cb.state === 'half_open') {
+      cb.half_open_attempts++;
+      return true;
+    }
+    return false;
+  },
+  resetCircuit(channel: ChannelType): void {
+    const cb = initCircuitBreaker(channel);
+    cb.state = 'closed';
+    cb.failure_count = 0;
+    cb.success_count = 0;
+    cb.last_state_change_at = now();
+  },
+  acquireToken(channel: ChannelType): boolean {
+    const rl = initRateLimiter(channel);
+    const elapsed = now() - rl.last_refill_at;
+    const refill = Math.floor(elapsed / 1000) * rl.max_rps;
+    if (refill > 0) {
+      rl.current_tokens = Math.min(rl.max_rps, rl.current_tokens + refill);
+      rl.last_refill_at = now();
+    }
+    if (rl.current_tokens > 0) {
+      rl.current_tokens--;
+      rl.total_allowed++;
+      return true;
+    }
+    rl.total_rejected++;
+    return false;
+  },
+  getRateLimiterState(channel: ChannelType): RateLimiterState {
+    return initRateLimiter(channel);
+  },
+  getAllRateLimiterStates(): RateLimiterState[] {
+    const channels: ChannelType[] = ['email', 'sms', 'inapp', 'webhook'];
+    return channels.map(ch => initRateLimiter(ch));
+  }
+};
+
 export const db = {
   init: initDatabase, templates: templateRepo, templateContents: templateContentRepo,
   users: userRepo, userPreferences: userPreferenceRepo, queue: queueRepo,
   history: historyRepo, alerts: alertRepo, apps: appRepo,
-  backlogSnapshots: backlogSnapshotRepo, flush: flushToDisk
+  backlogSnapshots: backlogSnapshotRepo, auditLogs: auditLogRepo,
+  latency: latencyRepo, channelRuntime: channelRuntimeRepo, flush: flushToDisk
 };
 
 export default db;
