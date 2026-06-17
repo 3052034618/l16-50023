@@ -3,6 +3,7 @@ import { alertService } from '../services/alertService';
 import { queueService } from '../services/queueService';
 import { historyService } from '../services/historyService';
 import { channelManager } from '../channels/channelManager';
+import { backlogSnapshotRepo } from '../database/store';
 import { AlertLevel, ChannelType } from '../types';
 
 const router = Router();
@@ -54,6 +55,41 @@ router.get('/queue/backlog', (req: Request, res: Response) => {
   }
 });
 
+router.get('/queue/backlog-trend', (req: Request, res: Response) => {
+  try {
+    const { channel, since } = req.query;
+    const trend = alertService.getBacklogTrend({
+      channel: channel as ChannelType | undefined,
+      since: since ? parseInt(since as string) : undefined
+    });
+    res.json(trend);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/queue/capture-snapshot', (req: Request, res: Response) => {
+  try {
+    const snapshots = backlogSnapshotRepo.capture();
+    res.json(snapshots);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/failure-reasons', (req: Request, res: Response) => {
+  try {
+    const { channel, limit } = req.query;
+    const reasons = historyService.getFailureReasons({
+      channel: channel as ChannelType | undefined,
+      limit: limit ? parseInt(limit as string) : undefined
+    });
+    res.json(reasons);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.get('/alerts', (req: Request, res: Response) => {
   try {
     const { level, resolved, type, channel, page, pageSize } = req.query;
@@ -84,6 +120,15 @@ router.post('/alerts/check', (req: Request, res: Response) => {
   try {
     const alerts = alertService.checkQueueBacklog();
     res.json({ triggered: alerts });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.post('/alerts/auto-resolve', (req: Request, res: Response) => {
+  try {
+    const resolved = alertService.runAutoResolve();
+    res.json({ resolved });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

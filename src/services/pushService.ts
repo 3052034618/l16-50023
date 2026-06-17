@@ -12,11 +12,7 @@ const HIGH_PRIORITY_LEVELS: PriorityType[] = ['high', 'urgent'];
 export class PushService {
   async send(request: PushRequest): Promise<{
     request_id: string;
-    messages: {
-      channel: ChannelType;
-      message_id: string;
-      status: string;
-    }[];
+    messages: { channel: ChannelType; message_id: string; status: string }[];
   }> {
     const requestId = uuidv4();
     const template = templateService.getTemplate(request.template_id);
@@ -87,7 +83,11 @@ export class PushService {
         channel,
         priority,
         params: request.params,
-        scheduled_at: request.scheduled_at
+        scheduled_at: request.scheduled_at,
+        language,
+        app_id: request.app_id,
+        rendered_subject: rendered.subject,
+        rendered_content: rendered.content
       });
 
       results.push({
@@ -114,29 +114,19 @@ export class PushService {
           throw new Error(`Template ${msg.template_id} not found`);
         }
 
-        let language = 'zh-CN';
-        if (msg.user_id) {
-          const user = userService.getUser(msg.user_id);
-          if (user) {
-            language = user.language;
-          }
-        }
+        const subject = msg.rendered_subject;
+        const content = msg.rendered_content;
+        const language = msg.language;
 
-        const rendered = templateService.renderTemplate(
-          msg.template_id,
-          language,
-          msg.channel,
-          msg.params
-        );
-        if (!rendered) {
-          throw new Error(`No template content for ${msg.template_id}/${language}/${msg.channel}`);
+        if (!content) {
+          throw new Error(`No rendered content for message ${msg.id}`);
         }
 
         const result = await channelManager.send(
           msg.channel,
           msg.recipient || '',
-          rendered.subject,
-          rendered.content,
+          subject,
+          content,
           msg.params
         );
 
@@ -157,14 +147,15 @@ export class PushService {
             priority: msg.priority,
             status: finalStatus as MessageStatus,
             language,
-            subject: rendered.subject,
-            content: rendered.content,
+            subject,
+            content,
             params: msg.params,
             retry_count: msg.retry_count,
             created_at: msg.created_at,
             sent_at: endTime,
             delivered_at: result.delivered ? endTime : undefined,
-            duration_ms: duration
+            duration_ms: duration,
+            app_id: msg.app_id
           });
 
           queueService.removeMessage(msg.id);
@@ -181,14 +172,15 @@ export class PushService {
               priority: msg.priority,
               status: 'failed',
               language,
-              subject: rendered.subject,
-              content: rendered.content,
+              subject,
+              content,
               params: msg.params,
               retry_count: msg.retry_count + 1,
               error_message: result.error,
               created_at: msg.created_at,
               sent_at: endTime,
-              duration_ms: duration
+              duration_ms: duration,
+              app_id: msg.app_id
             });
             queueService.removeMessage(msg.id);
           }
@@ -206,12 +198,13 @@ export class PushService {
             channel: msg.channel,
             priority: msg.priority,
             status: 'failed',
-            language: 'zh-CN',
-            content: '',
+            language: msg.language,
+            content: msg.rendered_content || '',
             params: msg.params,
             retry_count: msg.retry_count + 1,
             error_message: error.message,
-            created_at: msg.created_at
+            created_at: msg.created_at,
+            app_id: msg.app_id
           });
           queueService.removeMessage(msg.id);
         }

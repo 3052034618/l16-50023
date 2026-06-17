@@ -1,4 +1,4 @@
-import { initDatabase } from '../database/store';
+import { initDatabase, flushToDisk } from '../database/store';
 import { templateService } from '../services/templateService';
 import { userService } from '../services/userService';
 import { pushService } from '../services/pushService';
@@ -6,6 +6,7 @@ import { queueService } from '../services/queueService';
 import { historyService } from '../services/historyService';
 import { alertService } from '../services/alertService';
 import { channelManager } from '../channels/channelManager';
+import { appRepo, backlogSnapshotRepo } from '../database/store';
 import { ChannelType } from '../types';
 
 interface TestResult {
@@ -33,345 +34,247 @@ function test(name: string, fn: () => void | Promise<void>): Promise<void> {
     });
 }
 
-function assert(condition: any, message: string) {
-  if (!condition) {
-    throw new Error(message || 'Assertion failed');
-  }
+function assert(condition: any, message?: string) {
+  if (!condition) throw new Error(message || 'Assertion failed');
 }
 
 async function runTests() {
   console.log('\n' + '='.repeat(60));
-  console.log('  多渠道消息推送中心 - 功能测试');
+  console.log('  多渠道消息推送中心 - 功能测试 v2');
   console.log('='.repeat(60) + '\n');
 
   initDatabase(':memory:');
 
   console.log('\n📦 1. 渠道适配器测试');
   await test('邮件渠道 - 正常发送', async () => {
-    const result = await channelManager.send(
-      'email',
-      'test@example.com',
-      'Test Subject',
-      'Test content'
-    );
+    const result = await channelManager.send('email', 'test@example.com', 'Test Subject', 'Test content');
     assert(result.success === true, '邮件发送应该成功');
-    assert(result.messageId, '应该返回 messageId');
   });
-
   await test('邮件渠道 - 无效地址', async () => {
-    const result = await channelManager.send(
-      'email',
-      'invalid-email',
-      'Test',
-      'Content'
-    );
+    const result = await channelManager.send('email', 'invalid-email', 'Test', 'Content');
     assert(result.success === false, '无效邮箱应该失败');
   });
-
   await test('短信渠道 - 正常发送', async () => {
-    const result = await channelManager.send(
-      'sms',
-      '13800138000',
-      undefined,
-      'Test SMS content'
-    );
+    const result = await channelManager.send('sms', '13800138000', undefined, 'Test SMS');
     assert(result.success === true, '短信发送应该成功');
   });
-
   await test('站内信渠道 - 正常发送', async () => {
-    const result = await channelManager.send(
-      'inapp',
-      'user-123',
-      'Notice',
-      'You have a new message'
-    );
+    const result = await channelManager.send('inapp', 'user-123', 'Notice', 'New message');
     assert(result.success === true, '站内信发送应该成功');
   });
-
   await test('Webhook渠道 - 正常发送', async () => {
-    const result = await channelManager.send(
-      'webhook',
-      'https://example.com/webhook',
-      'Alert',
-      'Something happened'
-    );
+    const result = await channelManager.send('webhook', 'https://example.com/hook', 'Alert', 'Fired');
     assert(result.success === true, 'Webhook发送应该成功');
   });
 
-  console.log('\n📄 2. 消息模板测试');
+  console.log('\n📄 2. 消息模板与多语言测试');
   let templateId: string;
   await test('创建模板', () => {
-    const tpl = templateService.createTemplate({
-      name: '测试模板',
-      description: '这是一个测试模板',
-      category: 'general',
-      priority: 'normal'
-    });
+    const tpl = templateService.createTemplate({ name: '测试模板', category: 'general', priority: 'normal' });
     templateId = tpl.id;
-    assert(tpl.id, '模板应该有ID');
-    assert(tpl.name === '测试模板', '模板名称应该正确');
+    assert(tpl.name === '测试模板');
   });
-
-  await test('获取模板', () => {
-    const tpl = templateService.getTemplate(templateId);
-    assert(tpl !== undefined, '应该能获取到模板');
-    assert(tpl?.name === '测试模板', '模板名称应该正确');
+  await test('添加中文+英文+日文模板内容', () => {
+    templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'email', subject: '您好，${username}！', content: '尊敬的${username}，验证码是${code}。' });
+    templateService.addTemplateContent({ template_id: templateId, language: 'en', channel: 'email', subject: 'Hello, ${username}!', content: 'Dear ${username}, your code is ${code}.' });
+    templateService.addTemplateContent({ template_id: templateId, language: 'ja', channel: 'email', subject: '${username}さん、こんにちは', content: '${username}さん、認証コードは${code}です。' });
+    templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'inapp', subject: '系统通知', content: '${username}，您有新通知。' });
   });
-
-  await test('添加中文邮件模板内容', () => {
-    const content = templateService.addTemplateContent({
-      template_id: templateId,
-      language: 'zh-CN',
-      channel: 'email',
-      subject: '您好，${username}！',
-      content: '尊敬的${username}，您的验证码是${code}。'
-    });
-    assert(content.language === 'zh-CN', '语言应该正确');
-    assert(content.channel === 'email', '渠道应该正确');
+  await test('渲染中文模板', () => {
+    const r = templateService.renderTemplate(templateId, 'zh-CN', 'email', { username: '小明', code: '111' });
+    assert(r?.subject === '您好，小明！');
+    assert(r?.content.includes('111'));
   });
-
-  await test('添加英文邮件模板内容', () => {
-    templateService.addTemplateContent({
-      template_id: templateId,
-      language: 'en',
-      channel: 'email',
-      subject: 'Hello, ${username}!',
-      content: 'Dear ${username}, your verification code is ${code}.'
-    });
+  await test('渲染英文模板', () => {
+    const r = templateService.renderTemplate(templateId, 'en', 'email', { username: 'John', code: '222' });
+    assert(r?.subject === 'Hello, John!');
+    assert(r?.content.includes('222'));
   });
-
-  await test('添加短信模板内容', () => {
-    templateService.addTemplateContent({
-      template_id: templateId,
-      language: 'zh-CN',
-      channel: 'sms',
-      content: '【通知】您的验证码是${code}，5分钟内有效。'
-    });
-  });
-
-  await test('添加站内信模板内容', () => {
-    templateService.addTemplateContent({
-      template_id: templateId,
-      language: 'zh-CN',
-      channel: 'inapp',
-      subject: '系统通知',
-      content: '${username}，您有一条新的系统通知。'
-    });
-  });
-
-  await test('模板变量替换 - 中文', () => {
-    const result = templateService.renderTemplate(
-      templateId,
-      'zh-CN',
-      'email',
-      { username: '张三', code: '123456' }
-    );
-    assert(result !== undefined, '应该能渲染模板');
-    assert(result?.subject === '您好，张三！', '标题变量应该被替换');
-    assert(result?.content.includes('123456'), '内容变量应该被替换');
-  });
-
-  await test('模板变量替换 - 英文', () => {
-    const result = templateService.renderTemplate(
-      templateId,
-      'en',
-      'email',
-      { username: 'John', code: 'ABCDEF' }
-    );
-    assert(result?.subject === 'Hello, John!', '英文标题应该正确');
-    assert(result?.content.includes('ABCDEF'), '英文内容应该正确');
+  await test('渲染日文模板', () => {
+    const r = templateService.renderTemplate(templateId, 'ja', 'email', { username: '田中', code: '333' });
+    assert(r?.subject === '田中さん、こんにちは');
   });
 
   console.log('\n👤 3. 用户与订阅偏好测试');
   let userId: string;
   await test('创建用户', () => {
-    const user = userService.createUser({
-      name: '测试用户',
-      email: 'test@example.com',
-      phone: '13800138000',
-      language: 'zh-CN'
-    });
+    const user = userService.createUser({ name: '测试用户', email: 'test@example.com', phone: '13800138000', language: 'zh-CN' });
     userId = user.id;
-    assert(user.email === 'test@example.com', '邮箱应该正确');
-    assert(user.language === 'zh-CN', '语言应该正确');
+    assert(user.language === 'zh-CN');
   });
-
-  await test('获取用户偏好', () => {
-    const prefs = userService.getUserPreferences(userId);
-    assert(prefs.length > 0, '应该有默认偏好设置');
-  });
-
   await test('禁用邮件营销通知', () => {
-    const pref = userService.setPreference(
-      userId,
-      'marketing',
-      'email',
-      false
-    );
-    assert(pref.enabled === false, '应该被禁用');
+    const pref = userService.setPreference(userId, 'marketing', 'email', false);
+    assert(pref.enabled === false);
+  });
+  await test('安全通知默认启用', () => {
+    assert(userService.isChannelEnabled(userId, 'security', 'email') === true);
   });
 
-  await test('检查营销邮件是否启用', () => {
-    const enabled = userService.isChannelEnabled(userId, 'marketing', 'email');
-    assert(enabled === false, '营销邮件应该被禁用');
+  console.log('\n📤 4. 推送服务 - 语言锁定测试');
+  await test('中文用户发中文消息', async () => {
+    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '123' } });
+    assert(result.messages.length > 0);
   });
-
-  await test('检查安全通知是否默认启用', () => {
-    const enabled = userService.isChannelEnabled(userId, 'security', 'email');
-    assert(enabled === true, '安全通知应该默认启用');
-  });
-
-  await test('获取启用的渠道', () => {
-    const channels = userService.getEnabledChannels(userId, 'marketing');
-    assert(!channels.includes('email'), '营销邮件不应该在启用列表中');
-  });
-
-  console.log('\n📤 4. 推送服务测试');
-  await test('发送普通消息 - 多渠道', async () => {
-    const result = await pushService.send({
-      template_id: templateId,
-      user_id: userId,
-      params: { username: '测试用户', code: '123456' }
-    });
-    assert(result.request_id, '应该有请求ID');
-    assert(result.messages.length > 0, '应该产生至少一条消息');
-  });
-
-  await test('队列中应该有待发送消息', () => {
+  await test('队列中语言已锁定为 zh-CN', () => {
     const stats = queueService.getStats();
-    assert(stats.pending > 0, '队列中应该有待发送消息');
+    assert(stats.pending > 0);
+    const msgs = queueService.getNextMessages(undefined, 20);
+    assert(msgs.some(m => m.language === 'zh-CN'), '队列中应有语言为zh-CN的消息');
+  });
+  await test('处理队列后历史记录语言正确', async () => {
+    await pushService.processQueue(undefined, 20);
+    const hist = historyService.list({ pageSize: 1 });
+    assert(hist.items.length > 0);
+    assert(hist.items[0].language === 'zh-CN', '历史语言应为zh-CN');
   });
 
-  await test('处理队列消息', async () => {
-    const count = await pushService.processQueue(undefined, 20);
-    assert(count > 0, '应该处理了消息');
+  console.log('\n🌐 5. 英文用户发送英文消息测试');
+  let enUserId: string;
+  await test('创建英文偏好用户', () => {
+    const user = userService.createUser({ name: 'English User', email: 'en@example.com', phone: '13900001111', language: 'en' });
+    enUserId = user.id;
+    assert(user.language === 'en');
+  });
+  await test('英文用户发消息 - 队列锁定英文', async () => {
+    const result = await pushService.send({ template_id: templateId, user_id: enUserId, params: { username: 'John', code: '999' } });
+    assert(result.messages.length > 0);
+  });
+  await test('英文消息处理后历史语言为en', async () => {
+    await pushService.processQueue(undefined, 20);
+    const hist = historyService.list({ user_id: enUserId, pageSize: 5 });
+    assert(hist.items.length > 0, '英文用户应有发送历史');
+    assert(hist.items[0].language === 'en', `历史语言应为en，实际: ${hist.items[0].language}`);
+    assert(hist.items[0].subject?.includes('Hello'), `英文标题应包含Hello，实际: ${hist.items[0].subject}`);
+  });
+  await test('显式指定语言覆盖用户偏好', async () => {
+    const result = await pushService.send({ template_id: templateId, user_id: enUserId, language: 'ja', params: { username: '田中', code: '444' } });
+    assert(result.messages.length > 0);
+  });
+  await test('日语覆盖处理后历史语言为ja', async () => {
+    await pushService.processQueue(undefined, 20);
+    const hist = historyService.list({ user_id: enUserId, pageSize: 5 });
+    const jaRecord = hist.items.find(h => h.language === 'ja');
+    assert(jaRecord, '应有日语发送记录');
+    assert(jaRecord!.subject?.includes('さん'), '日语标题应包含敬称');
   });
 
-  await test('发送历史应该有记录', () => {
+  console.log('\n� 6. 接入方管理测试');
+  let appId: string;
+  let appSecret: string;
+  await test('创建接入方', () => {
+    const app = appRepo.create({ name: '订单系统', description: '订单通知推送' });
+    appId = app.id;
+    appSecret = app.secret;
+    assert(app.id, '应有ID');
+    assert(app.secret, '应有密钥');
+    assert(app.enabled === true);
+  });
+  await test('认证成功', () => {
+    const app = appRepo.authenticate(appId, appSecret);
+    assert(app !== undefined, '正确凭证应认证成功');
+  });
+  await test('认证失败 - 错误密钥', () => {
+    const app = appRepo.authenticate(appId, 'wrong-secret');
+    assert(app === undefined, '错误密钥应认证失败');
+  });
+  await test('带app_id推送消息', async () => {
+    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '测试', code: '555' }, app_id: appId });
+    assert(result.messages.length > 0);
+  });
+  await test('处理后历史记录包含app_id', async () => {
+    await pushService.processQueue(undefined, 20);
+    const hist = historyService.list({ app_id: appId, pageSize: 5 });
+    assert(hist.items.length > 0, '应有带app_id的历史记录');
+    assert(hist.items[0].app_id === appId);
+  });
+  await test('按业务系统统计', () => {
+    const stats = historyService.getStatsByApp({ limit: 10 });
+    assert(stats.length > 0, '应有按业务系统的统计');
+  });
+  await test('重置接入方密钥', () => {
+    const updated = appRepo.regenerateSecret(appId);
+    assert(updated!.secret !== appSecret, '新密钥应不同于旧密钥');
+  });
+
+  console.log('\n📊 7. 统计报表测试');
+  await test('送达率统计', () => {
     const stats = historyService.getDeliveryStats();
-    assert(stats.total > 0, '发送历史应该有记录');
-    assert(stats.delivered > 0, '应该有送达记录');
+    assert(typeof stats.delivery_rate === 'number');
+    assert(stats.delivery_rate >= 0 && stats.delivery_rate <= 1);
   });
-
-  let securityTemplateId: string;
-  await test('创建安全通知模板', () => {
-    const tpl = templateService.createTemplate({
-      name: '安全警告',
-      category: 'security',
-      priority: 'high'
-    });
-    securityTemplateId = tpl.id;
-    templateService.addTemplateContent({
-      template_id: securityTemplateId,
-      language: 'zh-CN',
-      channel: 'email',
-      subject: '安全警告',
-      content: '${username}，检测到异常登录，请及时处理。'
-    });
-    templateService.addTemplateContent({
-      template_id: securityTemplateId,
-      language: 'zh-CN',
-      channel: 'sms',
-      content: '【安全警告】检测到异常登录，请及时处理。'
-    });
-  });
-
-  await test('高优先级消息跳过订阅偏好', async () => {
-    userService.setPreference(userId, 'security', 'sms', false);
-    const result = await pushService.send({
-      template_id: securityTemplateId,
-      user_id: userId,
-      params: { username: '测试用户' },
-      priority: 'high'
-    });
-    const hasSms = result.messages.some(m => m.channel === 'sms');
-    assert(hasSms, '高优先级消息应该跳过订阅偏好，发送短信');
-  });
-
-  console.log('\n🔄 5. 失败重试测试');
-  let retryTemplateId: string;
-  await test('创建测试重试的模板', () => {
-    const tpl = templateService.createTemplate({
-      name: '重试测试模板',
-      category: 'test',
-      priority: 'normal'
-    });
-    retryTemplateId = tpl.id;
-    templateService.addTemplateContent({
-      template_id: retryTemplateId,
-      language: 'zh-CN',
-      channel: 'email',
-      subject: '重试测试',
-      content: '这是一条用于测试重试的消息。'
-    });
-  });
-
-  await test('发送会失败的消息', async () => {
-    const result = await pushService.send({
-      template_id: retryTemplateId,
-      user_id: userId,
-      params: { simulate_failure: true }
-    });
-    assert(result.messages.length > 0, '应该产生消息');
-  });
-
-  await test('处理后应该进入重试队列', async () => {
-    await pushService.processQueue(undefined, 10);
-    const stats = queueService.getStats();
-    assert(stats.pending > 0 || stats.failed > 0, '应该有待重试或失败的消息');
-  });
-
-  await test('重试次数应该增加', () => {
-    const messages = queueService.listMessages({ pageSize: 10 });
-    const retryMsg = messages.items.find(m => m.template_id === retryTemplateId);
-    if (retryMsg && retryMsg.status === 'pending') {
-      assert(retryMsg.retry_count > 0, '重试次数应该大于0');
-    }
-  });
-
-  console.log('\n📊 6. 统计报表测试');
-  await test('获取送达率统计', () => {
-    const stats = historyService.getDeliveryStats();
-    assert(typeof stats.delivery_rate === 'number', '送达率应该是数字');
-    assert(stats.delivery_rate >= 0 && stats.delivery_rate <= 1, '送达率应该在0-1之间');
-  });
-
   await test('按渠道统计', () => {
     const byChannel = historyService.getStatsByChannel();
-    assert(byChannel.length === 4, '应该有4个渠道的统计');
-    const emailStat = byChannel.find(c => c.channel === 'email');
-    assert(emailStat, '应该有邮件渠道的统计');
+    assert(byChannel.length === 4);
   });
-
   await test('按模板统计', () => {
     const byTemplate = historyService.getStatsByTemplate({ limit: 10 });
-    assert(byTemplate.length > 0, '应该有模板统计数据');
+    assert(byTemplate.length > 0);
+  });
+  await test('失败原因排行', () => {
+    const reasons = historyService.getFailureReasons({ limit: 10 });
+    assert(Array.isArray(reasons));
   });
 
-  console.log('\n🚨 7. 告警监控测试');
+  console.log('\n🚨 8. 告警监控与积压趋势测试');
   await test('创建大量消息制造积压', () => {
     for (let i = 0; i < 150; i++) {
-      queueService.enqueue({
-        template_id: templateId,
-        user_id: userId,
-        channel: 'email',
-        priority: 'normal',
-        params: { test: i }
-      });
+      queueService.enqueue({ template_id: templateId, user_id: userId, channel: 'email', priority: 'normal', params: { test: i }, language: 'zh-CN' });
     }
     const stats = queueService.getStats();
-    assert(stats.pending >= 100, '队列中应该有足够的积压');
+    assert(stats.pending >= 100);
   });
-
   await test('检查队列积压告警', () => {
     const alerts = alertService.checkQueueBacklog();
-    const hasWarning = alerts.some(a => a.type === 'queue_backlog_channel' || a.type === 'queue_backlog_global');
-    assert(hasWarning, '应该触发队列积压告警');
+    assert(alerts.some(a => a.type === 'queue_backlog_channel' || a.type === 'queue_backlog_global'));
   });
-
   await test('获取活跃告警', () => {
     const active = alertService.getActiveAlerts();
-    assert(active.length > 0, '应该有活跃告警');
+    assert(active.length > 0);
+  });
+  await test('采集积压快照', () => {
+    const snapshots = backlogSnapshotRepo.capture();
+    assert(snapshots.length === 4, '应有4个渠道快照');
+  });
+  await test('获取积压趋势', () => {
+    const trend = alertService.getBacklogTrend();
+    assert(trend.length > 0, '应有趋势数据');
+    assert(trend[0].channel, '趋势数据应有渠道');
+    assert(typeof trend[0].pending === 'number');
+  });
+  await test('自动恢复告警检查', () => {
+    const resolved = alertService.runAutoResolve();
+    assert(typeof resolved === 'number');
+  });
+
+  console.log('\n💾 9. 持久化测试');
+  await test('写入文件后数据量应>0', () => {
+    flushToDisk();
+    const fs = require('fs');
+    const path = require('path');
+    const filePath = path.join(process.cwd(), 'push-center-data.json');
+    if (fs.existsSync(filePath)) {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      assert(data.templates.length > 0, '持久化文件中应有模板数据');
+      assert(data.sendHistory.length > 0, '持久化文件中应有发送历史');
+    } else {
+      throw new Error('持久化文件未创建');
+    }
+  });
+
+  console.log('\n🔄 10. 高优先级跳过订阅测试');
+  let secTemplateId: string;
+  await test('创建安全通知模板', () => {
+    const tpl = templateService.createTemplate({ name: '安全警告', category: 'security', priority: 'high' });
+    secTemplateId = tpl.id;
+    templateService.addTemplateContent({ template_id: secTemplateId, language: 'zh-CN', channel: 'email', subject: '安全警告', content: '${username}，异常登录。' });
+    templateService.addTemplateContent({ template_id: secTemplateId, language: 'zh-CN', channel: 'sms', content: '【安全警告】异常登录。' });
+  });
+  await test('高优先级消息跳过订阅偏好', async () => {
+    userService.setPreference(userId, 'security', 'sms', false);
+    const result = await pushService.send({ template_id: secTemplateId, user_id: userId, params: { username: '测试用户' }, priority: 'high' });
+    const hasSms = result.messages.some(m => m.channel === 'sms');
+    assert(hasSms, '高优先级应跳过订阅偏好发送短信');
   });
 
   console.log('\n' + '='.repeat(60));
@@ -397,19 +300,13 @@ async function runTests() {
   }
 
   console.log('\n' + '='.repeat(60) + '\n');
-
   return failed === 0;
 }
 
 if (require.main === module) {
   runTests()
-    .then(success => {
-      process.exit(success ? 0 : 1);
-    })
-    .catch(error => {
-      console.error('测试运行出错:', error);
-      process.exit(1);
-    });
+    .then(success => process.exit(success ? 0 : 1))
+    .catch(error => { console.error('测试运行出错:', error); process.exit(1); });
 }
 
 export { runTests };

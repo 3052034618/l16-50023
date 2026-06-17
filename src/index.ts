@@ -1,6 +1,6 @@
 import express from 'express';
 import bodyParser from 'body-parser';
-import { initDatabase } from './database/store';
+import { initDatabase, flushToDisk } from './database/store';
 import { alertService } from './services/alertService';
 import { pushService } from './services/pushService';
 import pushRoutes from './routes/pushRoutes';
@@ -9,6 +9,7 @@ import userRoutes from './routes/userRoutes';
 import queueRoutes from './routes/queueRoutes';
 import historyRoutes from './routes/historyRoutes';
 import monitorRoutes from './routes/monitorRoutes';
+import appRoutes from './routes/appRoutes';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,6 +28,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/queue', queueRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/monitor', monitorRoutes);
+app.use('/api/apps', appRoutes);
 
 app.get('/health', (req, res) => {
   res.json({
@@ -63,7 +65,7 @@ function stopQueueWorker() {
 
 function startServer() {
   initDatabase();
-  console.log('[Database] Initialized');
+  console.log('[Database] Initialized with persistence');
 
   startQueueWorker();
   
@@ -78,31 +80,33 @@ function startServer() {
     console.log(`   Health: http://localhost:${PORT}/health`);
     console.log(`   API Base: http://localhost:${PORT}/api`);
     console.log(`\n   Available endpoints:`);
-    console.log(`   - POST /api/push/send           - 发送消息`);
-    console.log(`   - POST /api/push/process-queue  - 手动处理队列`);
-    console.log(`   - GET  /api/templates           - 模板列表`);
-    console.log(`   - GET  /api/users               - 用户列表`);
-    console.log(`   - GET  /api/queue/stats         - 队列统计`);
+    console.log(`   - POST /api/push/send              - 发送消息`);
+    console.log(`   - POST /api/push/process-queue     - 手动处理队列`);
+    console.log(`   - GET  /api/templates              - 模板列表`);
+    console.log(`   - GET  /api/users                  - 用户列表`);
+    console.log(`   - GET  /api/queue/stats            - 队列统计`);
     console.log(`   - GET  /api/history/stats/delivery - 送达统计`);
-    console.log(`   - GET  /api/monitor/overview    - 监控总览`);
-    console.log(`   - GET  /api/monitor/alerts/active - 活跃告警`);
+    console.log(`   - GET  /api/history/stats/by-app   - 按业务系统统计`);
+    console.log(`   - GET  /api/monitor/overview       - 监控总览`);
+    console.log(`   - GET  /api/monitor/queue/backlog-trend - 积压趋势`);
+    console.log(`   - GET  /api/monitor/failure-reasons - 失败原因排行`);
+    console.log(`   - GET  /api/monitor/alerts/active  - 活跃告警`);
+    console.log(`   - POST /api/apps                   - 创建接入方`);
     console.log('');
   });
 }
 
-process.on('SIGTERM', () => {
-  console.log('\nSIGTERM received, shutting down...');
+function gracefulShutdown() {
+  console.log('\nShutting down...');
   stopQueueWorker();
   alertService.stopMonitoring();
+  flushToDisk();
+  console.log('[Persistence] Data flushed to disk');
   process.exit(0);
-});
+}
 
-process.on('SIGINT', () => {
-  console.log('\nSIGINT received, shutting down...');
-  stopQueueWorker();
-  alertService.stopMonitoring();
-  process.exit(0);
-});
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);
 
 if (require.main === module) {
   startServer();

@@ -13,6 +13,10 @@ export class QueueService {
     params?: Record<string, any>;
     scheduled_at?: number;
     max_retries?: number;
+    language: string;
+    app_id?: string;
+    rendered_subject?: string;
+    rendered_content?: string;
   }): QueueMessage {
     return queueRepo.enqueue(data);
   }
@@ -36,13 +40,7 @@ export class QueueService {
     return queueRepo.incrementRetry(id, errorMessage, delay);
   }
 
-  getStats(): {
-    total: number;
-    pending: number;
-    sending: number;
-    failed: number;
-    byChannel: { channel: ChannelType; pending: number; sending: number; failed: number; total: number }[];
-  } {
+  getStats() {
     return queueRepo.stats();
   }
 

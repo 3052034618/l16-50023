@@ -61,6 +61,10 @@ export interface QueueMessage {
   created_at: number;
   sent_at?: number;
   delivered_at?: number;
+  language: string;
+  app_id?: string;
+  rendered_subject?: string;
+  rendered_content?: string;
 }
 
 export interface SendHistory {
@@ -82,6 +86,7 @@ export interface SendHistory {
   sent_at?: number;
   delivered_at?: number;
   duration_ms?: number;
+  app_id?: string;
 }
 
 export interface PushRequest {
@@ -93,6 +98,7 @@ export interface PushRequest {
   priority?: PriorityType;
   scheduled_at?: number;
   language?: string;
+  app_id?: string;
 }
 
 export interface ChannelResult {
@@ -105,20 +111,6 @@ export interface ChannelResult {
 export interface ChannelAdapter {
   name: ChannelType;
   send(recipient: string, subject: string | undefined, content: string, params?: Record<string, any>): Promise<ChannelResult>;
-}
-
-export interface QueueStats {
-  pending: number;
-  sending: number;
-  failed: number;
-  total: number;
-}
-
-export interface ChannelStats {
-  channel: ChannelType;
-  pending: number;
-  sending: number;
-  total: number;
 }
 
 export interface DeliveryStats {
@@ -140,4 +132,29 @@ export interface Alert {
   resolved: boolean;
   created_at: number;
   resolved_at?: number;
+}
+
+export interface AppClient {
+  id: string;
+  name: string;
+  secret: string;
+  description?: string;
+  enabled: boolean;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface BacklogSnapshot {
+  timestamp: number;
+  channel: ChannelType;
+  pending: number;
+  sending: number;
+  failed: number;
+}
+
+export interface FailureReasonEntry {
+  error: string;
+  count: number;
+  latest_at: number;
+  channel: ChannelType;
 }

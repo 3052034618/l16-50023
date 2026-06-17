@@ -1,5 +1,5 @@
 import { Alert, AlertLevel, ChannelType } from '../types';
-import { alertRepo } from '../database/store';
+import { alertRepo, backlogSnapshotRepo } from '../database/store';
 import { queueService } from './queueService';
 
 const QUEUE_THRESHOLDS: Record<ChannelType, { warning: number; critical: number }> = {
@@ -18,6 +18,8 @@ export class AlertService {
     if (this.checkInterval) return;
     this.checkInterval = setInterval(() => {
       this.checkQueueBacklog();
+      alertRepo.autoResolveCheck();
+      backlogSnapshotRepo.capture();
     }, intervalMs);
     console.log('[AlertService] Monitoring started');
   }
@@ -36,15 +38,13 @@ export class AlertService {
 
     if (stats.pending >= GLOBAL_THRESHOLDS.critical) {
       alerts.push(this.createAlert({
-        type: 'queue_backlog_global',
-        level: 'critical',
+        type: 'queue_backlog_global', level: 'critical',
         message: `全局队列积压严重: ${stats.pending} 条待发送消息`,
         details: JSON.stringify({ pending: stats.pending, threshold: GLOBAL_THRESHOLDS.critical })
       }));
     } else if (stats.pending >= GLOBAL_THRESHOLDS.warning) {
       alerts.push(this.createAlert({
-        type: 'queue_backlog_global',
-        level: 'warning',
+        type: 'queue_backlog_global', level: 'warning',
         message: `全局队列积压警告: ${stats.pending} 条待发送消息`,
         details: JSON.stringify({ pending: stats.pending, threshold: GLOBAL_THRESHOLDS.warning })
       }));
@@ -56,16 +56,14 @@ export class AlertService {
 
       if (channelStat.pending >= threshold.critical) {
         alerts.push(this.createAlert({
-          type: 'queue_backlog_channel',
-          level: 'critical',
+          type: 'queue_backlog_channel', level: 'critical',
           message: `${channelStat.channel} 渠道队列积压严重: ${channelStat.pending} 条`,
           channel: channelStat.channel as ChannelType,
           details: JSON.stringify({ pending: channelStat.pending, threshold: threshold.critical })
         }));
       } else if (channelStat.pending >= threshold.warning) {
         alerts.push(this.createAlert({
-          type: 'queue_backlog_channel',
-          level: 'warning',
+          type: 'queue_backlog_channel', level: 'warning',
           message: `${channelStat.channel} 渠道队列积压警告: ${channelStat.pending} 条`,
           channel: channelStat.channel as ChannelType,
           details: JSON.stringify({ pending: channelStat.pending, threshold: threshold.warning })
@@ -74,8 +72,7 @@ export class AlertService {
 
       if (channelStat.failed >= threshold.warning) {
         alerts.push(this.createAlert({
-          type: 'queue_failed_channel',
-          level: 'warning',
+          type: 'queue_failed_channel', level: 'warning',
           message: `${channelStat.channel} 渠道失败消息过多: ${channelStat.failed} 条`,
           channel: channelStat.channel as ChannelType,
           details: JSON.stringify({ failed: channelStat.failed, threshold: threshold.warning })
@@ -86,23 +83,12 @@ export class AlertService {
     return alerts;
   }
 
-  createAlert(data: {
-    type: string;
-    level: AlertLevel;
-    message: string;
-    channel?: ChannelType;
-    details?: string;
-  }): Alert {
+  createAlert(data: { type: string; level: AlertLevel; message: string; channel?: ChannelType; details?: string; }): Alert {
     const existing = alertRepo.findActive(data.type, data.channel);
     if (existing) {
-      if (existing.level === data.level) {
-        return existing;
-      }
-      if (existing.id !== undefined) {
-        this.resolveAlert(existing.id);
-      }
+      if (existing.level === data.level) return existing;
+      if (existing.id !== undefined) this.resolveAlert(existing.id);
     }
-
     const alert = alertRepo.create(data);
     console.log(`[ALERT] [${data.level.toUpperCase()}] ${data.message}`);
     return alert;
@@ -113,18 +99,22 @@ export class AlertService {
   }
 
   listAlerts(params?: {
-    level?: AlertLevel;
-    resolved?: boolean;
-    type?: string;
-    channel?: ChannelType;
-    page?: number;
-    pageSize?: number;
+    level?: AlertLevel; resolved?: boolean; type?: string; channel?: ChannelType;
+    page?: number; pageSize?: number;
   }): { items: Alert[]; total: number } {
     return alertRepo.list(params);
   }
 
   getActiveAlerts(): Alert[] {
     return alertRepo.getActive();
+  }
+
+  getBacklogTrend(params?: { channel?: ChannelType; since?: number; }) {
+    return backlogSnapshotRepo.getTrend(params);
+  }
+
+  runAutoResolve(): number {
+    return alertRepo.autoResolveCheck();
   }
 }
 
