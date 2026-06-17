@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { pushService } from '../services/pushService';
-import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth';
+import { authMiddleware } from '../middleware/auth';
 import { PushRequest } from '../types';
 
 const router = Router();
 
-router.post('/send', optionalAuthMiddleware, async (req: Request, res: Response) => {
+router.post('/send', authMiddleware, async (req: Request, res: Response) => {
   try {
     const request = req.body as PushRequest;
     if (!request.template_id) {

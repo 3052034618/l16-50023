@@ -20,6 +20,12 @@ export class PushService {
     if (!template) {
       throw new Error(`Template ${request.template_id} not found`);
     }
+    if (template.status !== 'published') {
+      throw new Error(`Template ${template.name} is not published, cannot send`);
+    }
+    if (template.published_version === 0) {
+      throw new Error(`Template ${template.name} has no published version`);
+    }
 
     let userId = request.user_id;
     let recipient = request.recipient;
@@ -72,7 +78,7 @@ export class PushService {
         language,
         channel,
         request.params,
-        template.current_version
+        template.published_version
       );
       if (!rendered) {
         continue;
@@ -90,7 +96,7 @@ export class PushService {
         app_id: request.app_id,
         rendered_subject: rendered.subject,
         rendered_content: rendered.content,
-        template_version: template.current_version
+        template_version: template.published_version
       });
 
       results.push({

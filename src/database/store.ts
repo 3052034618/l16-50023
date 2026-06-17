@@ -72,6 +72,9 @@ function loadFromFile(): boolean {
       for (const t of store.templates) {
         if (t.status === undefined) t.status = 'published';
         if (t.current_version === undefined) t.current_version = 1;
+        if (t.published_version === undefined) {
+          t.published_version = t.status === 'published' ? t.current_version : 0;
+        }
       }
       for (const tc of store.templateContents) {
         if (tc.version === undefined) tc.version = 1;
@@ -115,15 +118,21 @@ export function initDatabase(dbPath?: string): DataStore {
     latencyRecords: []
   };
 
-  if (dbPath && dbPath !== ':memory:') {
+  if (dbPath === ':memory:') {
+    dataFilePath = null;
+    console.log('[Persistence] Running in memory mode, no persistence');
+  } else if (dbPath) {
     dataFilePath = dbPath;
+    const loaded = loadFromFile();
+    if (!loaded) {
+      console.log('[Persistence] No existing data, starting fresh');
+    }
   } else {
     dataFilePath = path.join(process.cwd(), 'push-center-data.json');
-  }
-
-  const loaded = loadFromFile();
-  if (!loaded) {
-    console.log('[Persistence] No existing data, starting fresh');
+    const loaded = loadFromFile();
+    if (!loaded) {
+      console.log('[Persistence] No existing data, starting fresh');
+    }
   }
 
   return store;
@@ -146,7 +155,7 @@ export const templateRepo = {
     const t: Template = {
       id: generateId(), name: data.name, description: data.description,
       category: data.category || 'general', priority: (data.priority || 'normal') as PriorityType,
-      status: 'draft' as TemplateStatus, current_version: 1,
+      status: 'draft' as TemplateStatus, current_version: 1, published_version: 0,
       created_at: now(), updated_at: now()
     };
     getStore().templates.push(t);
@@ -181,6 +190,7 @@ export const templateRepo = {
     const t = this.get(id);
     if (!t) return undefined;
     t.status = 'published';
+    t.published_version = t.current_version;
     t.updated_at = now();
     scheduleSave();
     return t;
@@ -189,6 +199,25 @@ export const templateRepo = {
     const t = this.get(id);
     if (!t) return undefined;
     t.status = 'draft';
+    t.updated_at = now();
+    scheduleSave();
+    return t;
+  },
+  newVersion(id: string): Template | undefined {
+    const t = this.get(id);
+    if (!t) return undefined;
+    t.current_version += 1;
+    t.updated_at = now();
+    return t;
+  },
+  rollback(id: string, targetVersion: number): Template | undefined {
+    const t = this.get(id);
+    if (!t) return undefined;
+    const versions = templateContentRepo.getVersions(id);
+    if (!versions.includes(targetVersion)) return undefined;
+    t.published_version = targetVersion;
+    t.current_version = targetVersion;
+    t.status = 'published';
     t.updated_at = now();
     scheduleSave();
     return t;
@@ -254,17 +283,30 @@ export const templateContentRepo = {
     return true;
   },
   findBestMatch(template_id: string, language: string, channel: ChannelType, version?: number): TemplateContent | undefined {
-    const tpl = templateRepo.get(template_id);
-    const ver = version ?? (tpl ? tpl.current_version : undefined);
-    let all = getStore().templateContents.filter(tc => tc.template_id === template_id && tc.channel === channel);
-    if (ver !== undefined) {
-      all = all.filter(tc => tc.version === ver);
-    } else {
-      const maxVer = all.reduce((m, tc) => Math.max(m, tc.version), 0);
-      all = all.filter(tc => tc.version === maxVer);
-    }
+    const all = getStore().templateContents.filter(tc => tc.template_id === template_id && tc.channel === channel);
     if (all.length === 0) return undefined;
-    return all.find(tc => tc.language === language) || all.find(tc => tc.language === 'en') || all[0];
+
+    let versions: number[];
+    if (version !== undefined) {
+      versions = all
+        .filter(tc => tc.version <= version)
+        .map(tc => tc.version)
+        .filter((v, i, arr) => arr.indexOf(v) === i)
+        .sort((a, b) => b - a);
+    } else {
+      versions = all
+        .map(tc => tc.version)
+        .filter((v, i, arr) => arr.indexOf(v) === i)
+        .sort((a, b) => b - a);
+    }
+
+    for (const ver of versions) {
+      const verContents = all.filter(tc => tc.version === ver);
+      const exact = verContents.find(tc => tc.language === language);
+      if (exact) return exact;
+    }
+
+    return undefined;
   }
 };
 
@@ -392,7 +434,31 @@ export const queueRepo = {
     if (!msg) return undefined;
     if (msg.status !== 'pending') return undefined;
     msg.status = 'cancelled';
+    msg.error_message = 'cancelled by user';
+    msg.sent_at = now();
     scheduleSave();
+
+    const tpl = templateRepo.get(msg.template_id);
+    historyRepo.record({
+      id: msg.id,
+      template_id: msg.template_id,
+      template_name: tpl?.name || 'Unknown',
+      user_id: msg.user_id,
+      recipient: msg.recipient,
+      channel: msg.channel,
+      priority: msg.priority,
+      status: 'cancelled',
+      language: msg.language,
+      subject: msg.rendered_subject,
+      content: msg.rendered_content || '',
+      params: msg.params,
+      retry_count: msg.retry_count,
+      created_at: msg.created_at,
+      sent_at: msg.sent_at,
+      app_id: msg.app_id,
+      error_message: 'cancelled by user'
+    });
+
     return msg;
   },
   reschedule(id: string, scheduled_at: number): QueueMessage | undefined {

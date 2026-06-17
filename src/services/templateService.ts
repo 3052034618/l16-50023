@@ -40,21 +40,11 @@ export class TemplateService {
   }
 
   newVersion(id: string): Template | undefined {
-    const t = templateRepo.get(id);
-    if (!t) return undefined;
-    t.current_version += 1;
-    t.updated_at = Date.now();
-    return t;
+    return templateRepo.newVersion(id);
   }
 
   rollbackVersion(id: string, targetVersion: number): Template | undefined {
-    const t = templateRepo.get(id);
-    if (!t) return undefined;
-    const versions = templateContentRepo.getVersions(id);
-    if (!versions.includes(targetVersion)) return undefined;
-    t.current_version = targetVersion;
-    t.updated_at = Date.now();
-    return t;
+    return templateRepo.rollback(id, targetVersion);
   }
 
   getVersions(template_id: string): number[] {

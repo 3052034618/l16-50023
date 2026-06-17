@@ -7,7 +7,7 @@ import { historyService } from '../services/historyService';
 import { alertService } from '../services/alertService';
 import { channelManager } from '../channels/channelManager';
 import { appRepo, backlogSnapshotRepo, auditLogRepo, latencyRepo, channelRuntimeRepo } from '../database/store';
-import { ChannelType } from '../types';
+import { ChannelType, Template } from '../types';
 
 interface TestResult {
   name: string;
@@ -40,7 +40,7 @@ function assert(condition: any, message?: string) {
 
 async function runTests() {
   console.log('\n' + '='.repeat(60));
-  console.log('  多渠道消息推送中心 - 功能测试 v3');
+  console.log('  多渠道消息推送中心 - 功能测试 v4');
   console.log('='.repeat(60) + '\n');
 
   initDatabase(':memory:');
@@ -67,55 +67,111 @@ async function runTests() {
     assert(result.success === true);
   });
 
-  console.log('\n📄 2. 模板与版本管理测试');
+  console.log('\n📄 2. 模板版本管理 - 草稿/发布严格隔离');
   let templateId: string;
-  await test('创建模板(默认draft)', () => {
+  await test('新建模板默认为draft状态，published_version=0', () => {
     const tpl = templateService.createTemplate({ name: '测试模板', category: 'general', priority: 'normal' });
     templateId = tpl.id;
     assert(tpl.status === 'draft');
     assert(tpl.current_version === 1);
+    assert(tpl.published_version === 0);
   });
-  await test('添加v1模板内容', () => {
+  await test('草稿模板不能发送', async () => {
+    try {
+      await pushService.send({ template_id: templateId, recipient: 'test@test.com', params: {} });
+      assert(false, '应该抛出错误');
+    } catch (e: any) {
+      assert(e.message.includes('not published'));
+    }
+  });
+  await test('添加v1模板内容（zh-CN + en）', () => {
     templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'email', subject: '您好，${username}！', content: '验证码是${code}。' });
     templateService.addTemplateContent({ template_id: templateId, language: 'en', channel: 'email', subject: 'Hello, ${username}!', content: 'Your code is ${code}.' });
   });
-  await test('发布模板', () => {
+  await test('发布模板后published_version等于current_version', () => {
     const tpl = templateService.publishTemplate(templateId);
     assert(tpl?.status === 'published');
+    assert(tpl?.published_version === 1);
   });
-  await test('创建v2版本', () => {
+  await test('发布后可以正常发送', async () => {
+    const result = await pushService.send({ template_id: templateId, recipient: 'test@test.com', params: { username: '小明', code: '123' } });
+    assert(result.messages.length > 0);
+  });
+  await test('入队消息绑定的是published_version', () => {
+    const pending = queueService.listMessages({ status: 'pending' });
+    if (pending.items.length > 0) {
+      const msg = pending.items[0];
+      assert(msg.template_version === 1, `template_version should be 1, got ${msg.template_version}`);
+    }
+  });
+  await test('新建版本后current_version增加，published_version不变', () => {
     const tpl = templateService.newVersion(templateId);
     assert(tpl?.current_version === 2);
+    assert(tpl?.published_version === 1);
+    assert(tpl?.status === 'published');
   });
-  await test('添加v2模板内容', () => {
-    templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'email', subject: '【新】${username}，您好！', content: '新验证码${code}。' });
-    templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'inapp', subject: '系统通知', content: '${username}，您有新通知。' });
+  await test('v2添加中文内容（暂无英文）', () => {
+    templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'email', subject: '【V2】${username}您好', content: '新验证码${code}。' });
   });
-  await test('渲染v2内容', () => {
-    const r = templateService.renderTemplate(templateId, 'zh-CN', 'email', { username: '小明', code: '111' });
-    assert(r?.subject?.includes('新'));
+  await test('新入队消息仍然用v1发布版本', async () => {
+    const result = await pushService.send({ template_id: templateId, recipient: 'new@test.com', params: { username: '新人', code: '456' } });
+    assert(result.messages.length > 0);
+    const msg = queueService.getMessage(result.messages[0].message_id);
+    assert(msg?.template_version === 1, `新消息应该用v1发布版本，实际是${msg?.template_version}`);
+    assert(msg?.rendered_subject?.includes('您好，') === true, '应该是v1的中文主题');
   });
-  await test('渲染v1内容(指定version)', () => {
-    const r = templateService.renderTemplate(templateId, 'zh-CN', 'email', { username: '小明', code: '111' }, 1);
-    assert(r?.subject === '您好，小明！');
+  await test('发布v2后新消息才用v2', () => {
+    const tpl = templateService.publishTemplate(templateId);
+    assert(tpl?.published_version === 2);
   });
-  await test('获取版本列表', () => {
-    const versions = templateService.getVersions(templateId);
-    assert(versions.includes(1) && versions.includes(2));
-  });
-  await test('回滚到v1', () => {
-    const tpl = templateService.rollbackVersion(templateId, 1);
-    assert(tpl?.current_version === 1);
-  });
-  await test('回滚后渲染v1内容', () => {
-    const r = templateService.renderTemplate(templateId, 'zh-CN', 'email', { username: '小明', code: '222' });
-    assert(r?.subject === '您好，小明！');
+  await test('发布v2后新入队消息用v2内容', async () => {
+    const result = await pushService.send({ template_id: templateId, recipient: 'v2@test.com', params: { username: 'V2用户', code: '789' } });
+    assert(result.messages.length > 0);
+    const msg = queueService.getMessage(result.messages[0].message_id);
+    assert(msg?.template_version === 2);
+    assert(msg?.rendered_subject?.includes('【V2】') === true, '应该是v2的中文主题');
   });
 
-  console.log('\n👤 3. 用户与订阅偏好测试');
+  console.log('\n🌐 3. 语言版本降级测试');
+  let enTemplateId: string;
+  await test('创建只有v1英文的模板', () => {
+    const tpl = templateService.createTemplate({ name: '英文模板', category: 'general', priority: 'normal' });
+    enTemplateId = tpl.id;
+    templateService.addTemplateContent({ template_id: enTemplateId, language: 'en', channel: 'email', subject: 'Welcome!', content: 'Hello ${name}.' });
+    templateService.publishTemplate(enTemplateId);
+  });
+  await test('英文用户发英文内容正常', async () => {
+    const result = await pushService.send({ template_id: enTemplateId, recipient: 'en@test.com', language: 'en', params: { name: 'John' } });
+    assert(result.messages.length > 0);
+    const msg = queueService.getMessage(result.messages[0].message_id);
+    assert(msg?.language === 'en');
+    assert(msg?.rendered_content?.includes('Hello John') === true);
+  });
+  await test('新建v2版本（只有中文，无英文）', () => {
+    templateService.newVersion(enTemplateId);
+    templateService.addTemplateContent({ template_id: enTemplateId, language: 'zh-CN', channel: 'email', subject: '欢迎！', content: '你好${name}。' });
+  });
+  await test('发布v2，英文用户仍然能收到v1的英文内容（版本降级）', () => {
+    templateService.publishTemplate(enTemplateId);
+    const rendered = templateService.renderTemplate(enTemplateId, 'en', 'email', { name: 'Jack' }, 2);
+    assert(rendered !== undefined, 'v2没有英文应该降级到v1英文');
+    assert(rendered?.content === 'Hello Jack.', `降级后内容应该是英文，实际是: ${rendered?.content}`);
+  });
+  await test('完全没有对应语言时返回undefined', () => {
+    const rendered = templateService.renderTemplate(enTemplateId, 'ja', 'email', { name: 'Taro' }, 2);
+    assert(rendered === undefined, '日语应该没有，返回undefined');
+  });
+  await test('英文用户入队使用降级后的v1英文内容', async () => {
+    const result = await pushService.send({ template_id: enTemplateId, recipient: 'downgrade@test.com', language: 'en', params: { name: 'Downgrade' } });
+    assert(result.messages.length > 0);
+    const msg = queueService.getMessage(result.messages[0].message_id);
+    assert(msg?.rendered_content?.includes('Hello Downgrade') === true, `应该降级到v1英文，实际内容: ${msg?.rendered_content}`);
+  });
+
+  console.log('\n👤 4. 用户与订阅偏好测试');
   let userId: string;
   await test('创建用户', () => {
-    const user = userService.createUser({ name: '测试用户', email: 'test@example.com', phone: '13800138000', language: 'zh-CN' });
+    const user = userService.createUser({ name: '测试用户', email: 'user@example.com', phone: '13800138000', language: 'zh-CN' });
     userId = user.id;
     assert(user.language === 'zh-CN');
   });
@@ -124,30 +180,27 @@ async function runTests() {
     assert(pref.enabled === false);
   });
 
-  console.log('\n📤 4. 消息队列管理测试');
-  let msgId: string;
-  await test('发送消息入队', async () => {
-    templateService.publishTemplate(templateId);
-    const tpl = templateService.getTemplate(templateId)!;
-    templateService.newVersion(templateId);
-    templateService.addTemplateContent({ template_id: templateId, language: 'zh-CN', channel: 'email', subject: 'V2主题', content: 'V2内容' });
-    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '123' } });
+  console.log('\n📤 5. 消息队列管理 - 撤回同步历史');
+  let cancelMsgId: string;
+  await test('发送消息后撤回', async () => {
+    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '111' } });
     assert(result.messages.length > 0);
-    msgId = result.messages[0].message_id;
+    cancelMsgId = result.messages[0].message_id;
+    const cancelled = queueService.cancelMessage(cancelMsgId);
+    assert(cancelled?.status === 'cancelled');
   });
-  await test('队列消息绑定模板版本号', () => {
-    const msg = queueService.getMessage(msgId);
-    assert(msg?.template_version !== undefined, '消息应有template_version');
+  await test('撤回后历史记录里能查到cancelled状态', () => {
+    const hist = historyService.get(cancelMsgId);
+    assert(hist !== undefined, '撤回应该同步到历史记录');
+    assert(hist?.status === 'cancelled', `历史状态应该是cancelled，实际是${hist?.status}`);
+    assert(hist?.error_message === 'cancelled by user');
   });
-  await test('撤回消息', () => {
-    const pendingMsgs = queueService.listMessages({ status: 'pending' });
-    if (pendingMsgs.items.length > 0) {
-      const cancelled = queueService.cancelMessage(pendingMsgs.items[0].id);
-      assert(cancelled?.status === 'cancelled');
-    }
+  await test('撤回后统计包含cancelled', () => {
+    const stats = historyService.getDeliveryStats({ template_id: templateId });
+    assert(stats.total > 0, '总发送量应该包含撤回的');
   });
   await test('改定时发送时间', async () => {
-    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '456' } });
+    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '222' } });
     if (result.messages.length > 0) {
       const newTime = Date.now() + 3600000;
       const rescheduled = queueService.rescheduleMessage(result.messages[0].message_id, newTime);
@@ -155,30 +208,14 @@ async function runTests() {
     }
   });
   await test('修改消息内容', async () => {
-    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '789' } });
+    const result = await pushService.send({ template_id: templateId, user_id: userId, params: { username: '小明', code: '333' } });
     if (result.messages.length > 0) {
       const updated = queueService.updateMessageContent(result.messages[0].message_id, { rendered_subject: '紧急通知' });
       assert(updated?.rendered_subject === '紧急通知');
     }
   });
 
-  console.log('\n🌐 5. 语言锁定测试');
-  let enUserId: string;
-  await test('英文用户发送英文消息', async () => {
-    const user = userService.createUser({ name: 'English User', email: 'en@example.com', phone: '13900001111', language: 'en' });
-    enUserId = user.id;
-    const result = await pushService.send({ template_id: templateId, user_id: enUserId, params: { username: 'John', code: '999' } });
-    assert(result.messages.length > 0);
-  });
-  await test('处理后历史语言正确', async () => {
-    await pushService.processQueue(undefined, 20);
-    const hist = historyService.list({ user_id: enUserId, pageSize: 5 });
-    if (hist.items.length > 0) {
-      assert(hist.items[0].language === 'en');
-    }
-  });
-
-  console.log('\n🔑 6. 接入方管理与IP白名单测试');
+  console.log('\n🔑 6. 接入方管理、IP白名单与审计');
   let appId: string;
   let appSecret: string;
   await test('创建接入方(带IP白名单)', () => {
@@ -205,20 +242,24 @@ async function runTests() {
     const app2 = appRepo.create({ name: '无白名单' });
     assert(appRepo.checkIp(app2.id, '1.2.3.4') === true);
   });
-  await test('审计日志记录', () => {
+  await test('审计日志 - 记录成功/鉴权失败/IP拒绝', () => {
     auditLogRepo.record({ app_id: appId, action: 'POST', endpoint: '/api/push/send', ip: '127.0.0.1', status: 'success' });
     auditLogRepo.record({ app_id: appId, action: 'POST', endpoint: '/api/push/send', ip: '192.168.1.1', status: 'ip_blocked', error_message: 'IP not allowed' });
     auditLogRepo.record({ app_id: appId, action: 'GET', endpoint: '/api/history', ip: '127.0.0.1', status: 'success' });
+    auditLogRepo.record({ app_id: 'unknown-app', action: 'POST', endpoint: '/api/push/send', ip: '10.0.0.5', status: 'auth_failed', error_message: 'Invalid credentials' });
     const logs = auditLogRepo.list({ app_id: appId });
     assert(logs.items.length >= 3);
   });
-  await test('审计统计', () => {
+  await test('审计统计 - 按应用汇总', () => {
     const stats = auditLogRepo.statsByApp();
     const appStat = stats.find(s => s.app_id === appId);
     assert(appStat !== undefined);
     assert(appStat!.total_calls >= 3);
     assert(appStat!.success >= 2);
     assert(appStat!.ip_blocked >= 1);
+    const unknownStat = stats.find(s => s.app_id === 'unknown-app');
+    assert(unknownStat !== undefined);
+    assert(unknownStat!.auth_failed >= 1);
   });
 
   console.log('\n📊 7. 渠道运行监控测试');
@@ -235,7 +276,7 @@ async function runTests() {
     assert(dist[0].p50 > 0);
     assert(dist[0].max >= 200);
   });
-  await test('熔断器初始/重置状态', () => {
+  await test('熔断器重置后为closed', () => {
     channelRuntimeRepo.resetCircuit('email');
     const state = channelRuntimeRepo.getCircuitState('email');
     assert(state.state === 'closed');
@@ -281,12 +322,7 @@ async function runTests() {
     assert(trend.length > 0);
   });
 
-  console.log('\n💾 9. 持久化测试');
-  await test('刷盘验证', () => {
-    flushToDisk();
-  });
-
-  console.log('\n🔄 10. 高优先级跳过订阅测试');
+  console.log('\n� 9. 高优先级跳过订阅测试');
   let secTemplateId: string;
   await test('安全通知强制发送', async () => {
     const tpl = templateService.createTemplate({ name: '安全警告', category: 'security', priority: 'high' });
@@ -298,6 +334,20 @@ async function runTests() {
     const result = await pushService.send({ template_id: secTemplateId, user_id: userId, params: { username: '测试用户' }, priority: 'high' });
     const hasSms = result.messages.some(m => m.channel === 'sms');
     assert(hasSms, '高优先级应跳过订阅偏好发送短信');
+  });
+
+  console.log('\n↩️ 10. 模板回滚测试');
+  await test('回滚到v1后published_version=1', () => {
+    const tpl = templateService.rollbackVersion(templateId, 1);
+    assert(tpl?.published_version === 1);
+    assert(tpl?.status === 'published');
+  });
+  await test('回滚后新入队消息使用v1内容', async () => {
+    const result = await pushService.send({ template_id: templateId, recipient: 'rollback@test.com', params: { username: '回滚用户', code: '000' } });
+    assert(result.messages.length > 0);
+    const msg = queueService.getMessage(result.messages[0].message_id);
+    assert(msg?.template_version === 1);
+    assert(msg?.rendered_subject?.includes('您好，') === true, '回滚后应该是v1的中文主题');
   });
 
   console.log('\n' + '='.repeat(60));

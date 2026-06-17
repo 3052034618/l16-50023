@@ -16,6 +16,7 @@ export interface Template {
   priority: PriorityType;
   status: TemplateStatus;
   current_version: number;
+  published_version: number;
   created_at: number;
   updated_at: number;
 }
